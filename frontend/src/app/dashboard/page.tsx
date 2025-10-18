@@ -142,12 +142,6 @@ async function uploadFileWithProgress(
 export default function DashboardPage() {
   const router = useRouter()
 
-  // Existing demo/placeholder data
-  const ongoingCalls = [
-    { id: 1, customer: "John Smith", duration: "5:23", status: "active", sentiment: "positive" },
-    { id: 2, customer: "Sarah Johnson", duration: "2:45", status: "active", sentiment: "neutral" },
-    { id: 3, customer: "Mike Davis", duration: "8:12", status: "active", sentiment: "positive" },
-  ]
 
   // ===== Knowledge Base state =====
   const [collections, setCollections] = useState<KnowledgeCollection[]>([])
@@ -707,64 +701,32 @@ export default function DashboardPage() {
                 </div>
               ) : (
                 <div className="space-y-4">
-                  {activeSessions.map((session) => (
-                    <div
-                      key={session.id}
-                      className="flex cursor-pointer items-center justify-between rounded-lg border border-border p-4 transition-colors hover:bg-accent"
-                      onClick={() => router.push(`/session/${session.id}`)}
-                    >
-                      <div className="flex items-center gap-3">
-                        <div className="flex h-10 w-10 items-center justify-center rounded-full bg-primary/10">
-                          <Phone className="h-5 w-5 text-primary" />
-                        </div>
-                        <div>
-                          <p className="font-medium">{session.customer_name || 'Anonymous'}</p>
-                          <p className="text-xs text-muted-foreground">Duration: {getTimeSince(session.created_at)}</p>
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <Badge variant="default" className="bg-green-500">
-                          Active
-                        </Badge>
-                        <div className="h-2 w-2 animate-pulse rounded-full bg-green-500" />
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-              <div className="space-y-4">
-                {ongoingCalls.map((call) => (
+                {activeSessions.map((session) => (
                   <div
-                    key={call.id}
+                    key={session.id}
                     className="flex cursor-pointer items-center justify-between rounded-lg border border-border p-4 transition-colors hover:bg-accent"
-                    onClick={() => router.push("/transcripts")}
+                    onClick={() => router.push(`/session/${session.id}`)}
                   >
                     <div className="flex items-center gap-3">
                       <div className="flex h-10 w-10 items-center justify-center rounded-full bg-primary/10">
                         <Phone className="h-5 w-5 text-primary" />
                       </div>
                       <div>
-                        <p className="font-medium">{call.customer}</p>
-                        <p className="text-xs text-muted-foreground">Duration: {call.duration}</p>
+                        <p className="font-medium">{session.customer_name || 'Anonymous'}</p>
+                        <p className="text-xs text-muted-foreground">Duration: {getTimeSince(session.created_at)}</p>
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
-                      <Badge
-                        variant={
-                          call.sentiment === "positive"
-                            ? "default"
-                            : call.sentiment === "neutral"
-                            ? "secondary"
-                            : "destructive"
-                        }
-                      >
-                        {call.sentiment}
+                      <Badge variant="default" className="bg-green-500">
+                        Active
                       </Badge>
                       <div className="h-2 w-2 animate-pulse rounded-full bg-green-500" />
                     </div>
                   </div>
                 ))}
-              </div>
+                </div>
+              )}
+
 
               <Button variant="outline" className="mt-4 w-full bg-transparent" onClick={() => router.push("/transcripts")}>
                 View All Calls
