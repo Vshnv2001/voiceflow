@@ -8,46 +8,15 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Progress } from "@/components/ui/progress"
 import { Badge } from "@/components/ui/badge"
-import { Mic, Phone, Upload, FileText, TrendingUp, Users, Clock, LogOut } from "lucide-react"
+import { Mic, Phone, Upload, FileText, TrendingUp, Users, Clock } from "lucide-react"
 import Link from "next/link"
-import { useState, useEffect } from "react"
-import { useAuth } from "@/contexts/AuthContext"
 import { useRouter } from "next/navigation"
+import { useState } from "react"
 
 export default function DashboardPage() {
+  const router = useRouter()
   const [uploadedFiles, setUploadedFiles] = useState<File[]>([])
   const [isDragging, setIsDragging] = useState(false)
-  const { user, signOut, loading } = useAuth()
-  const router = useRouter()
-
-  // Redirect to login if not authenticated
-  useEffect(() => {
-    if (!loading && !user) {
-      router.push('/login')
-    }
-  }, [user, loading, router])
-
-  const handleSignOut = async () => {
-    await signOut()
-    router.push('/login')
-  }
-
-  // Show loading state while checking authentication
-  if (loading) {
-    return (
-      <div className="flex min-h-screen items-center justify-center">
-        <div className="text-center">
-          <div className="h-8 w-8 animate-spin rounded-full border-4 border-primary border-t-transparent mx-auto mb-4"></div>
-          <p>Loading...</p>
-        </div>
-      </div>
-    )
-  }
-
-  // Don't render anything if not authenticated (will redirect)
-  if (!user) {
-    return null
-  }
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
@@ -91,21 +60,8 @@ export default function DashboardPage() {
             <span className="text-xl font-bold">VoiceFlow AI</span>
           </Link>
           <nav className="flex items-center gap-4">
-            <div className="text-right">
-              <span className="text-sm text-muted-foreground">
-                Welcome, {user.user_metadata?.full_name || user.email}
-              </span>
-              {user.user_metadata?.organization && (
-                <div className="text-xs text-muted-foreground">
-                  {user.user_metadata.organization}
-                </div>
-              )}
-            </div>
             <Button variant="ghost">Settings</Button>
-            <Button variant="ghost" onClick={handleSignOut}>
-              <LogOut className="h-4 w-4 mr-2" />
-              Sign Out
-            </Button>
+            <Button variant="ghost">Profile</Button>
           </nav>
         </div>
       </header>
@@ -149,9 +105,12 @@ export default function DashboardPage() {
           </Card>
 
           <Card>
-            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-sm font-medium">Avg. Response Time</CardTitle>
-              <Clock className="h-4 w-4 text-muted-foreground" />
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Clock className="h-5 w-5" />
+                Avg. Response Time
+              </CardTitle>
+              <CardDescription>Real-time monitoring of active conversations</CardDescription>
             </CardHeader>
             <CardContent>
               <div className="text-2xl font-bold">1.2s</div>
@@ -229,7 +188,11 @@ export default function DashboardPage() {
             <CardContent>
               <div className="space-y-4">
                 {ongoingCalls.map((call) => (
-                  <div key={call.id} className="flex items-center justify-between rounded-lg border border-border p-4">
+                  <div
+                    key={call.id}
+                    className="flex cursor-pointer items-center justify-between rounded-lg border border-border p-4 transition-colors hover:bg-accent"
+                    onClick={() => router.push("/transcripts")}
+                  >
                     <div className="flex items-center gap-3">
                       <div className="flex h-10 w-10 items-center justify-center rounded-full bg-primary/10">
                         <Phone className="h-5 w-5 text-primary" />
@@ -257,7 +220,11 @@ export default function DashboardPage() {
                 ))}
               </div>
 
-              <Button variant="outline" className="mt-4 w-full bg-transparent">
+              <Button
+                variant="outline"
+                className="mt-4 w-full bg-transparent"
+                onClick={() => router.push("/transcripts")}
+              >
                 View All Calls
               </Button>
             </CardContent>
