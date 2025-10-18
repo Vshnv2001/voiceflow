@@ -6,9 +6,11 @@ import { Badge } from "@/components/ui/badge"
 import { usePendingSessions } from "@/hooks/usePendingSessions"
 import { Phone, Clock, User, CheckCircle, XCircle, AlertCircle } from "lucide-react"
 import { useState } from "react"
+import { useRouter } from "next/navigation"
 
 export default function PendingCalls() {
   console.log('PendingCalls component mounted')
+  const router = useRouter()
   const { pendingSessions, loading, error, acceptSession, rejectSession } = usePendingSessions()
   console.log('PendingCalls - pendingSessions:', pendingSessions)
   console.log('PendingCalls - loading:', loading)
@@ -21,8 +23,9 @@ export default function PendingCalls() {
     setProcessingId(null)
     
     if (result.success) {
-      // Could show a success toast here
-      console.log('Session accepted successfully')
+      console.log('Session accepted successfully, navigating to conversation...')
+      // Navigate to the agent conversation page
+      router.push(`/agent/conversation/${sessionId}`)
     } else {
       alert(result.error || 'Failed to accept session')
     }
