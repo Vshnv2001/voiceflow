@@ -62,6 +62,12 @@ export function usePendingSessions() {
     console.log('Calling fetchPendingSessions()...')
     fetchPendingSessions()
 
+    // Set up polling - refetch every 5 seconds
+    const pollInterval = setInterval(() => {
+      console.log('Polling: Refetching pending sessions...')
+      fetchPendingSessions()
+    }, 5000) // Poll every 5 seconds
+
     // Set up real-time subscription
     const channel = supabase
       .channel('pending-sessions-changes')
@@ -130,8 +136,9 @@ export function usePendingSessions() {
       )
       .subscribe()
 
-    // Cleanup subscription on unmount
+    // Cleanup subscription and polling on unmount
     return () => {
+      clearInterval(pollInterval)
       supabase.removeChannel(channel)
     }
   }, [user])

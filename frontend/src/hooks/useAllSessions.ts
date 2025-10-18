@@ -61,6 +61,12 @@ export function useAllSessions() {
     console.log('Calling fetchAllSessions()...')
     fetchAllSessions()
 
+    // Set up polling - refetch every 5 seconds
+    const pollInterval = setInterval(() => {
+      console.log('Polling: Refetching all sessions...')
+      fetchAllSessions()
+    }, 5000) // Poll every 5 seconds
+
     // Set up real-time subscription
     const channel = supabase
       .channel('all-sessions-changes')
@@ -117,8 +123,9 @@ export function useAllSessions() {
       )
       .subscribe()
 
-    // Cleanup subscription on unmount
+    // Cleanup subscription and polling on unmount
     return () => {
+      clearInterval(pollInterval)
       supabase.removeChannel(channel)
     }
   }, [user])
