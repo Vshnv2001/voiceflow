@@ -6,13 +6,16 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Avatar } from "@/components/ui/avatar"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
 import { supabase } from "@/lib/supabase"
 import { 
   Users, Phone, Mail, Building, Clock, TrendingUp, Star, 
   ArrowLeft, PhoneCall, MessageCircle, Calendar, Award,
-  CheckCircle, XCircle, AlertCircle
+  CheckCircle, XCircle, AlertCircle, User
 } from "lucide-react"
 import Navigation from "@/components/Navigation"
+import { initiateCustomerServiceCall } from "@/lib/api"
 
 interface Rep {
   id: string
@@ -38,6 +41,12 @@ export default function RepDetailPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [calling, setCalling] = useState(false)
+  const [customerName, setCustomerName] = useState("")
+  const [showNameInput, setShowNameInput] = useState(false)
+  const [nameSubmitted, setNameSubmitted] = useState(false)
+  const [callStatus, setCallStatus] = useState<'idle' | 'initiating' | 'pending' | 'active' | 'error'>('idle')
+  const [callStatusMessage, setCallStatusMessage] = useState<string>("")
+  const [sessionId, setSessionId] = useState<string | null>(null)
 
   useEffect(() => {
     if (params.id) {
@@ -103,13 +112,60 @@ export default function RepDetailPage() {
     }
   }
 
+  const handleNameSubmit = () => {
+    if (customerName.trim()) {
+      setNameSubmitted(true)
+      setShowNameInput(false)
+    }
+  }
+
   const handleCall = async () => {
+    if (!nameSubmitted) {
+      setShowNameInput(true)
+      return
+    }
+    
     setCalling(true)
-    // Simulate call initiation (non-functional for now)
-    setTimeout(() => {
+    setCallStatus('initiating')
+    setCallStatusMessage('Initiating call request...')
+    
+    try {
+      // Call the initiateCustomerServiceCall API
+      const response = await initiateCustomerServiceCall({
+        customer_name: customerName,
+        rep_id: rep?.user_id || '',
+        priority: 'normal',
+        issue_type: '',
+        description: ''
+      })
+      
+      if (response.data) {
+        setSessionId((response.data as any).id)
+        setCallStatus('pending')
+        setCallStatusMessage(`Call request sent! Waiting for ${rep?.display_name} to accept...`)
+        setCalling(false)
+      } else {
+        setCallStatus('error')
+        setCallStatusMessage(response.error || 'Failed to initiate call')
+        setCalling(false)
+        setError(response.error || 'Failed to initiate call')
+      }
+    } catch (err) {
+      setCallStatus('error')
+      setCallStatusMessage('Network error. Please try again.')
       setCalling(false)
-      alert("Call functionality will be implemented in the future!")
-    }, 2000)
+      setError('Network error. Please try again.')
+    }
+  }
+
+  const handleStartOver = () => {
+    setCustomerName("")
+    setNameSubmitted(false)
+    setShowNameInput(false)
+    setCalling(false)
+    setCallStatus('idle')
+    setCallStatusMessage("")
+    setSessionId(null)
   }
 
   if (loading) {
@@ -207,43 +263,6 @@ export default function RepDetailPage() {
           </div>
         </div>
 
-        {/* Call Action */}
-        <Card className="mb-8 border-primary/20 bg-primary/5">
-          <CardContent className="p-6">
-            <div className="flex flex-col md:flex-row items-center justify-between gap-4">
-              <div>
-                <h3 className="text-xl font-semibold mb-2">Ready to Get Help?</h3>
-                <p className="text-muted-foreground">
-                  {rep.status === 'active' 
-                    ? `${rep.display_name} is currently available and ready to assist you.`
-                    : rep.status === 'break'
-                    ? `${rep.display_name} is currently on a break but will be back soon.`
-                    : `${rep.display_name} is currently offline. You can still leave a message.`
-                  }
-                </p>
-              </div>
-              <div className="flex gap-3">
-                <Button 
-                  onClick={handleCall}
-                  disabled={calling || rep.status === 'offline'}
-                  size="lg"
-                  className="flex items-center gap-2"
-                >
-                  <PhoneCall className="h-5 w-5" />
-                  {calling ? "Connecting..." : "Call Now"}
-                </Button>
-                <Button 
-                  variant="outline" 
-                  size="lg"
-                  className="flex items-center gap-2"
-                >
-                  <MessageCircle className="h-5 w-5" />
-                  Message
-                </Button>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
 
         {/* Performance Metrics */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
@@ -379,25 +398,141 @@ export default function RepDetailPage() {
                 : " While they're currently " + rep.status + ", you can still reach out and they'll get back to you as soon as possible."
               }
             </p>
-            <div className="flex flex-col sm:flex-row gap-4 justify-center">
-              <Button 
-                onClick={handleCall}
-                disabled={calling || rep.status === 'offline'}
-                size="lg"
-                className="flex items-center gap-2"
-              >
-                <PhoneCall className="h-5 w-5" />
-                {calling ? "Connecting..." : "Call Now"}
-              </Button>
-              <Button 
-                variant="outline" 
-                size="lg"
-                className="flex items-center gap-2"
-              >
-                <MessageCircle className="h-5 w-5" />
-                Send Message
-              </Button>
-            </div>
+            
+            {/* Show name input if not submitted yet */}
+            {!nameSubmitted && (
+              <div className="max-w-md mx-auto mb-6">
+                <div className="bg-background/50 rounded-lg p-4 border border-border/50">
+                  <div className="flex items-center gap-2 mb-3">
+                    <User className="h-5 w-5 text-primary" />
+                    <h4 className="font-semibold">Enter your name to start</h4>
+                  </div>
+                  <div className="flex gap-3">
+                    <Input
+                      type="text"
+                      placeholder="Your full name"
+                      value={customerName}
+                      onChange={(e) => setCustomerName(e.target.value)}
+                      onKeyDown={(e) => e.key === 'Enter' && handleNameSubmit()}
+                      className="flex-1"
+                    />
+                    <Button 
+                      onClick={handleNameSubmit}
+                      disabled={!customerName.trim()}
+                    >
+                      Continue
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Show confirmation if name is submitted */}
+            {nameSubmitted && callStatus === 'idle' && (
+              <div className="max-w-md mx-auto mb-6">
+                <div className="bg-green-50 border border-green-200 rounded-lg p-4">
+                  <div className="flex items-center justify-center gap-2">
+                    <CheckCircle className="h-5 w-5 text-green-600" />
+                    <span className="text-green-800 font-medium">
+                      Ready to call as: <strong>{customerName}</strong>
+                    </span>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Call Status Messages */}
+            {callStatus === 'initiating' && (
+              <div className="max-w-md mx-auto mb-6">
+                <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                  <div className="flex items-center justify-center gap-3">
+                    <div className="h-5 w-5 animate-spin rounded-full border-2 border-blue-600 border-t-transparent"></div>
+                    <span className="text-blue-800 font-medium">{callStatusMessage}</span>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {callStatus === 'pending' && (
+              <div className="max-w-md mx-auto mb-6">
+                <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-6">
+                  <div className="flex flex-col items-center gap-3">
+                    <div className="flex items-center gap-3">
+                      <Clock className="h-6 w-6 text-yellow-600 animate-pulse" />
+                      <span className="text-yellow-800 font-semibold text-lg">{callStatusMessage}</span>
+                    </div>
+                    <p className="text-yellow-700 text-sm text-center">
+                      You'll be connected as soon as they're available. Session ID: <code className="bg-yellow-100 px-2 py-1 rounded text-xs">{sessionId?.slice(0, 8)}...</code>
+                    </p>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleStartOver}
+                      className="mt-2"
+                    >
+                      Cancel Request
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {callStatus === 'active' && (
+              <div className="max-w-md mx-auto mb-6">
+                <div className="bg-green-50 border border-green-200 rounded-lg p-4">
+                  <div className="flex items-center justify-center gap-3">
+                    <div className="h-3 w-3 animate-pulse rounded-full bg-green-600"></div>
+                    <span className="text-green-800 font-medium">{callStatusMessage}</span>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {callStatus === 'error' && (
+              <div className="max-w-md mx-auto mb-6">
+                <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+                  <div className="flex items-center justify-center gap-3">
+                    <XCircle className="h-5 w-5 text-red-600" />
+                    <span className="text-red-800 font-medium">{callStatusMessage}</span>
+                  </div>
+                  <div className="text-center mt-3">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleStartOver}
+                    >
+                      Try Again
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Show buttons only when not in pending or active call state */}
+            {callStatus !== 'pending' && callStatus !== 'active' && (
+              <div className="flex flex-col sm:flex-row gap-4 justify-center">
+                <Button 
+                  onClick={handleCall}
+                  disabled={calling || rep.status === 'offline' || callStatus === 'error'}
+                  size="lg"
+                  className="flex items-center gap-2"
+                >
+                  <PhoneCall className="h-5 w-5" />
+                  {calling ? "Connecting..." : nameSubmitted ? "Call Now" : "Start Call"}
+                </Button>
+                {nameSubmitted && callStatus === 'idle' && (
+                  <Button 
+                    variant="outline"
+                    onClick={handleStartOver}
+                    size="lg"
+                    className="flex items-center gap-2"
+                  >
+                    <User className="h-5 w-5" />
+                    Change Name
+                  </Button>
+                )}
+              </div>
+            )}
           </CardContent>
         </Card>
       </div>

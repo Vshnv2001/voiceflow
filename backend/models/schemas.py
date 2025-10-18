@@ -11,6 +11,7 @@ class SessionStatus(str, Enum):
     ACTIVE = "active"
     CLOSED = "closed"
     PAUSED = "paused"
+    PENDING = "pending"
 
 class MessageType(str, Enum):
     VOICE = "voice"
@@ -38,16 +39,25 @@ class JobStatus(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
 
+class CustomerServiceCallRequest(BaseModel):
+    customer_name: Optional[str] = None
+    rep_id: str
+    priority: str
+    issue_type: Optional[str] = None
+    description: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = Field(default_factory=dict)
+
 # ==================== SESSION SCHEMAS ====================
 
 class SessionCreate(BaseModel):
-    customer_id: Optional[str] = None
+    customer_rep_id: Optional[str] = None
+    customer_name: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = Field(default_factory=dict)
 
 class SessionResponse(BaseModel):
     id: str
-    user_id: str
-    customer_id: Optional[str]
+    customer_rep_id: Optional[str]
+    customer_name: Optional[str]
     status: SessionStatus
     created_at: datetime
     updated_at: datetime

@@ -13,8 +13,6 @@ export default function AgentPage() {
   useEffect(() => {
     if (!loading && !user) {
       router.push('/login')
-    } else if (user && user.role !== 'agent' && user.role !== 'admin') {
-      router.push('/dashboard')
     }
   }, [user, loading, router])
 

@@ -20,25 +20,37 @@ class DatabaseService:
     
     async def create_session(
         self, 
-        user_id: str, 
-        customer_id: Optional[str] = None,
+        customer_rep_id: Optional[str] = None, 
+        customer_name: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """Create a new session"""
         try:
+            print(f"Creating session for customer_rep_id: {customer_rep_id}, customer_name: {customer_name}")
             data = {
-                "user_id": user_id,
-                "customer_id": customer_id,
-                "status": "active",
+                "customer_rep_id": customer_rep_id,
+                "customer_name": customer_name,
+                "status": "pending",
                 "metadata": metadata or {}
             }
             
             result = self.supabase.table("sessions").insert(data).execute()
+            print(f"Session created: {result.data[0]}")
             return result.data[0]
             
         except Exception as e:
             print(f"Error creating session: {e}")
             raise Exception(f"Failed to create session: {str(e)}")
+        
+    async def accept_session(self, session_id: str, customer_rep_id: str) -> bool:
+        """Accept a session"""
+        try:
+            # TODO: Make sure customer_rep_id has the given session id
+            result = self.supabase.table("sessions").update({"status": "active"}).eq("id", session_id).eq("customer_rep_id", customer_rep_id).execute()
+            return len(result.data) > 0
+        except Exception as e:
+            print(f"Error accepting session: {e}")
+            return False
     
     async def get_session(self, session_id: str, user_id: str) -> Optional[Dict[str, Any]]:
         """Get a session by ID"""
@@ -69,6 +81,46 @@ class DatabaseService:
             
         except Exception as e:
             print(f"Error getting sessions: {e}")
+            return []
+    
+    async def get_pending_sessions_for_rep(
+        self, 
+        customer_rep_id: str,
+        limit: int = 50,
+        offset: int = 0
+    ) -> List[Dict[str, Any]]:
+        """Get pending sessions for a specific customer rep"""
+        try:
+            result = self.supabase.table("sessions")\
+                .select("*")\
+                .eq("customer_rep_id", customer_rep_id)\
+                .eq("status", "pending")\
+                .order("created_at", desc=True)\
+                .range(offset, offset + limit - 1)\
+                .execute()
+            return result.data
+        except Exception as e:
+            print(f"Error getting pending sessions for rep: {e}")
+            return []
+    
+    async def get_active_sessions_for_rep(
+        self, 
+        customer_rep_id: str,
+        limit: int = 50,
+        offset: int = 0
+    ) -> List[Dict[str, Any]]:
+        """Get active sessions for a specific customer rep"""
+        try:
+            result = self.supabase.table("sessions")\
+                .select("*")\
+                .eq("customer_rep_id", customer_rep_id)\
+                .eq("status", "active")\
+                .order("created_at", desc=True)\
+                .range(offset, offset + limit - 1)\
+                .execute()
+            return result.data
+        except Exception as e:
+            print(f"Error getting active sessions for rep: {e}")
             return []
     
     async def update_session(
