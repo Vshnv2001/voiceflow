@@ -482,7 +482,7 @@ async def upload_document(
     collection_ids: Optional[str] = Form(None),  # JSON string of collection IDs
     current_user: dict = Depends(get_current_user)
 ):
-    """Upload a document to the knowledge base"""
+    """Upload a document to ElevenLabs knowledge base"""
     try:
         # Validate file type
         allowed_types = ['pdf', 'txt', 'docx', 'md']
@@ -502,7 +502,7 @@ async def upload_document(
             except json.JSONDecodeError:
                 raise HTTPException(status_code=400, detail="Invalid collection_ids format. Expected JSON array.")
         
-        # Upload document
+        # Upload document to ElevenLabs knowledge base
         document = await knowledge_service.upload_document(
             file_content=file_content,
             file_name=file.filename,
@@ -516,7 +516,7 @@ async def upload_document(
             document_id=document['id'],
             file_url=document['file_url'],
             status="processing",
-            message="Document uploaded successfully and is being processed"
+            message="Document uploaded successfully to ElevenLabs knowledge base and is being processed"
         )
         
     except Exception as e:
@@ -560,14 +560,24 @@ async def get_document(
 @app.delete("/api/knowledge/documents/{document_id}")
 async def delete_document(
     document_id: str,
+    force: bool = False,
     current_user: dict = Depends(get_current_user)
 ):
-    """Delete a document"""
+    """Delete a document from both ElevenLabs knowledge base and local database"""
     try:
-        success = await knowledge_service.delete_document(document_id, current_user["id"])
+        success = await knowledge_service.delete_document(
+            document_id=document_id, 
+            user_id=current_user["id"],
+            force=force
+        )
         if not success:
             raise HTTPException(status_code=404, detail="Document not found")
-        return {"message": "Document deleted successfully"}
+        
+        message = "Document deleted successfully from ElevenLabs knowledge base and local database"
+        if force:
+            message += " (forced deletion)"
+        
+        return {"message": message}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -636,6 +646,44 @@ async def search_knowledge_base(
             similarity_threshold=search_request.similarity_threshold
         )
         return results
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ==================== ELEVENLABS KNOWLEDGE BASE ENDPOINTS ====================
+
+@app.get("/api/knowledge/elevenlabs/files")
+async def get_elevenlabs_files(
+    upload_status: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get ElevenLabs knowledge base files for the current user"""
+    try:
+        files = await db_service.get_elevenlabs_knowledge_files(
+            user_id=current_user["id"],
+            upload_status=upload_status,
+            limit=limit,
+            offset=offset
+        )
+        return {"files": files}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/knowledge/elevenlabs/collections")
+async def get_elevenlabs_collections(
+    limit: int = 50,
+    offset: int = 0,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get ElevenLabs knowledge base collections for the current user"""
+    try:
+        collections = await db_service.get_elevenlabs_knowledge_collections(
+            user_id=current_user["id"],
+            limit=limit,
+            offset=offset
+        )
+        return {"collections": collections}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

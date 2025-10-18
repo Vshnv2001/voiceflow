@@ -507,7 +507,8 @@ class DatabaseService:
         file_name: str,
         file_type: str,
         file_size: int,
-        file_url: str
+        file_url: str,
+        elevenlabs_file_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """Create a knowledge document"""
         try:
@@ -521,6 +522,9 @@ class DatabaseService:
                 "file_url": file_url,
                 "status": "processing"
             }
+            
+            if elevenlabs_file_id:
+                data["elevenlabs_file_id"] = elevenlabs_file_id
             
             result = self.supabase.table("knowledge_documents").insert(data).execute()
             return result.data[0]
@@ -557,6 +561,7 @@ class DatabaseService:
         """Get a knowledge document by ID"""
         try:
             result = self.supabase.table("knowledge_documents").select("*").eq("id", document_id).eq("user_id", user_id).execute()
+            print(result)
             return result.data[0] if result.data else None
             
         except Exception as e:
@@ -609,13 +614,13 @@ class DatabaseService:
 
 
     async def delete_knowledge_document(self, document_id: str, user_id: str) -> bool:
-        """Delete a knowledge document + its storage object."""
+        """Delete a knowledge document and its chunks"""
         try:
-            # 1) Fetch the row to learn the storage path before deletion
+            # 1) Fetch the row to get the ElevenLabs file ID before deletion
             doc_res = (
                 self.supabase
                 .table("knowledge_documents")
-                .select("id, file_url")
+                .select("id, elevenlabs_file_id")
                 .eq("id", document_id)
                 .eq("user_id", user_id)
                 .single()
@@ -625,27 +630,31 @@ class DatabaseService:
             if not doc:
                 return False
 
-            # 2) Delete the row and force representation to get reliable data back
+            # 2) Delete chunks first (they will be deleted by CASCADE, but let's be explicit)
+            self.supabase.table("knowledge_chunks").delete().eq("document_id", document_id).execute()
+
+            # 3) Delete the document
             del_res = (
                 self.supabase
                 .table("knowledge_documents")
                 .delete()
                 .eq("id", document_id)
                 .eq("user_id", user_id)
-                .select("id")                  # <— THIS forces return=representation
                 .execute()
             )
-            deleted = bool(del_res.data)       # now this is trustworthy
+            deleted = len(del_res.data) > 0    # Check if any rows were deleted
 
-            # 3) Best-effort removal from Storage (after DB delete)
-            if deleted and doc.get("file_url"):
-                bucket, path = self._parse_storage_path(doc["file_url"])
-                if bucket and path:
-                    try:
-                        self.supabase.storage.from_(bucket).remove([path])
-                    except Exception as se:
-                        # don't fail the whole operation; log and move on
-                        print(f"Storage remove failed for {bucket}/{path}: {se}")
+            # 4) If we have an ElevenLabs file ID, also delete the ElevenLabs file record
+            if deleted and doc.get("elevenlabs_file_id"):
+                try:
+                    # Find the ElevenLabs file record by the file ID
+                    elevenlabs_file_result = self.supabase.table("elevenlabs_knowledge_files").select("id").eq("elevenlabs_file_id", doc["elevenlabs_file_id"]).execute()
+                    if elevenlabs_file_result.data:
+                        elevenlabs_file_record_id = elevenlabs_file_result.data[0]["id"]
+                        # Delete the ElevenLabs file record
+                        self.supabase.table("elevenlabs_knowledge_files").delete().eq("id", elevenlabs_file_record_id).execute()
+                except Exception as e:
+                    print(f"Warning: Failed to delete ElevenLabs file record: {e}")
 
             return deleted
 
@@ -834,3 +843,122 @@ class DatabaseService:
         except Exception as e:
             print(f"Error removing document from collection: {e}")
             return False
+    
+    # ==================== ELEVENLABS KNOWLEDGE BASE OPERATIONS ====================
+    
+    async def create_elevenlabs_knowledge_file(
+        self,
+        user_id: str,
+        elevenlabs_file_id: str,
+        elevenlabs_name: str,
+        original_filename: str,
+        file_type: str,
+        file_size: int,
+        upload_status: str = "uploading",
+        error_message: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Create an ElevenLabs knowledge file record"""
+        try:
+            data = {
+                "user_id": user_id,
+                "elevenlabs_file_id": elevenlabs_file_id,
+                "elevenlabs_name": elevenlabs_name,
+                "original_filename": original_filename,
+                "file_type": file_type,
+                "file_size": file_size,
+                "upload_status": upload_status
+            }
+            
+            if error_message:
+                data["error_message"] = error_message
+            
+            result = self.supabase.table("elevenlabs_knowledge_files").insert(data).execute()
+            return result.data[0]
+            
+        except Exception as e:
+            print(f"Error creating ElevenLabs knowledge file: {e}")
+            raise Exception(f"Failed to create ElevenLabs knowledge file: {str(e)}")
+    
+    async def update_elevenlabs_knowledge_file(
+        self,
+        file_id: str,
+        upload_status: Optional[str] = None,
+        error_message: Optional[str] = None
+    ) -> bool:
+        """Update an ElevenLabs knowledge file record"""
+        try:
+            update_data = {}
+            if upload_status is not None:
+                update_data["upload_status"] = upload_status
+            if error_message is not None:
+                update_data["error_message"] = error_message
+            
+            result = self.supabase.table("elevenlabs_knowledge_files").update(update_data).eq("id", file_id).execute()
+            return len(result.data) > 0
+            
+        except Exception as e:
+            print(f"Error updating ElevenLabs knowledge file: {e}")
+            return False
+    
+    async def get_elevenlabs_knowledge_files(
+        self,
+        user_id: str,
+        upload_status: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0
+    ) -> List[Dict[str, Any]]:
+        """Get ElevenLabs knowledge files for a user"""
+        try:
+            query = self.supabase.table("elevenlabs_knowledge_files").select("*").eq("user_id", user_id)
+            
+            if upload_status:
+                query = query.eq("upload_status", upload_status)
+            
+            result = query.order("created_at", desc=True).range(offset, offset + limit - 1).execute()
+            return result.data
+            
+        except Exception as e:
+            print(f"Error getting ElevenLabs knowledge files: {e}")
+            return []
+    
+    async def create_elevenlabs_knowledge_collection(
+        self,
+        user_id: str,
+        elevenlabs_collection_id: str,
+        elevenlabs_name: str,
+        local_name: str,
+        description: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Create an ElevenLabs knowledge collection record"""
+        try:
+            data = {
+                "user_id": user_id,
+                "elevenlabs_collection_id": elevenlabs_collection_id,
+                "elevenlabs_name": elevenlabs_name,
+                "local_name": local_name
+            }
+            
+            if description:
+                data["description"] = description
+            
+            result = self.supabase.table("elevenlabs_knowledge_collections").insert(data).execute()
+            return result.data[0]
+            
+        except Exception as e:
+            print(f"Error creating ElevenLabs knowledge collection: {e}")
+            raise Exception(f"Failed to create ElevenLabs knowledge collection: {str(e)}")
+    
+    async def get_elevenlabs_knowledge_collections(
+        self,
+        user_id: str,
+        limit: int = 50,
+        offset: int = 0
+    ) -> List[Dict[str, Any]]:
+        """Get ElevenLabs knowledge collections for a user"""
+        try:
+            result = self.supabase.table("elevenlabs_knowledge_collections").select("*").eq("user_id", user_id).order("created_at", desc=True).range(offset, offset + limit - 1).execute()
+            return result.data
+            
+        except Exception as e:
+            print(f"Error getting ElevenLabs knowledge collections: {e}")
+            return []
