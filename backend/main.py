@@ -3,7 +3,7 @@ VoiceFlow AI - Voice-based Customer Service Backend
 FastAPI application for handling voice messages, AI responses, and agent approvals
 """
 
-from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, BackgroundTasks, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
@@ -17,10 +17,13 @@ from services.voice_service import VoiceService
 from services.ai_service import AIService
 from services.database_service import DatabaseService
 from services.auth_service import AuthService
+from services.knowledge_service import KnowledgeService
 from models.schemas import (
     SessionCreate, SessionResponse, MessageCreate, MessageResponse,
     VoiceProcessingJobResponse, AgentApprovalRequest, SystemConfigUpdate,
-    VoiceResponse, VoiceSynthesisRequest, VoiceSynthesisResponse
+    VoiceResponse, VoiceSynthesisRequest, VoiceSynthesisResponse,
+    KnowledgeDocumentCreate, KnowledgeDocumentResponse, KnowledgeCollectionCreate,
+    KnowledgeCollectionResponse, DocumentUploadResponse, RAGSearchRequest, RAGSearchResponse
 )
 
 # Initialize FastAPI app
@@ -47,6 +50,7 @@ voice_service = VoiceService()
 ai_service = AIService()
 db_service = DatabaseService()
 auth_service = AuthService()
+knowledge_service = KnowledgeService()
 
 # Dependency to get current user
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
@@ -396,6 +400,174 @@ async def update_system_config(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# ==================== KNOWLEDGE BASE ENDPOINTS ====================
+
+@app.post("/api/knowledge/documents/upload", response_model=DocumentUploadResponse)
+async def upload_document(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    title: str = Form(...),
+    description: Optional[str] = Form(None),
+    collection_ids: Optional[str] = Form(None),  # JSON string of collection IDs
+    current_user: dict = Depends(get_current_user)
+):
+    """Upload a document to the knowledge base"""
+    try:
+        # Validate file type
+        allowed_types = ['pdf', 'txt', 'docx', 'md']
+        file_ext = file.filename.split('.')[-1].lower() if '.' in file.filename else ''
+        if file_ext not in allowed_types:
+            raise HTTPException(status_code=400, detail=f"Unsupported file type. Allowed: {', '.join(allowed_types)}")
+        
+        # Read file content
+        file_content = await file.read()
+        
+        # Parse collection IDs if provided
+        collection_id_list = None
+        if collection_ids:
+            try:
+                import json
+                collection_id_list = json.loads(collection_ids)
+            except json.JSONDecodeError:
+                raise HTTPException(status_code=400, detail="Invalid collection_ids format. Expected JSON array.")
+        
+        # Upload document
+        document = await knowledge_service.upload_document(
+            file_content=file_content,
+            file_name=file.filename,
+            user_id=current_user["id"],
+            title=title,
+            description=description,
+            collection_ids=collection_id_list
+        )
+        
+        return DocumentUploadResponse(
+            document_id=document.id,
+            file_url=document.file_url,
+            status="processing",
+            message="Document uploaded successfully and is being processed"
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/knowledge/documents", response_model=List[KnowledgeDocumentResponse])
+async def get_documents(
+    collection_id: Optional[str] = None,
+    status: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get user's knowledge documents"""
+    try:
+        documents = await knowledge_service.get_documents(
+            user_id=current_user["id"],
+            collection_id=collection_id,
+            status=status,
+            limit=limit,
+            offset=offset
+        )
+        return documents
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/knowledge/documents/{document_id}", response_model=KnowledgeDocumentResponse)
+async def get_document(
+    document_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get a specific document"""
+    try:
+        document = await knowledge_service.get_document(document_id, current_user["id"])
+        if not document:
+            raise HTTPException(status_code=404, detail="Document not found")
+        return document
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/knowledge/documents/{document_id}")
+async def delete_document(
+    document_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Delete a document"""
+    try:
+        success = await knowledge_service.delete_document(document_id, current_user["id"])
+        if not success:
+            raise HTTPException(status_code=404, detail="Document not found")
+        return {"message": "Document deleted successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/knowledge/collections", response_model=KnowledgeCollectionResponse)
+async def create_collection(
+    collection_data: KnowledgeCollectionCreate,
+    current_user: dict = Depends(get_current_user)
+):
+    """Create a knowledge collection"""
+    try:
+        collection = await knowledge_service.create_collection(
+            user_id=current_user["id"],
+            name=collection_data.name,
+            description=collection_data.description,
+            is_public=collection_data.is_public
+        )
+        return collection
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/knowledge/collections", response_model=List[KnowledgeCollectionResponse])
+async def get_collections(
+    include_public: bool = True,
+    limit: int = 50,
+    offset: int = 0,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get user's knowledge collections"""
+    try:
+        collections = await knowledge_service.get_collections(
+            user_id=current_user["id"],
+            include_public=include_public,
+            limit=limit,
+            offset=offset
+        )
+        return collections
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/knowledge/collections/{collection_id}")
+async def delete_collection(
+    collection_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Delete a collection"""
+    try:
+        success = await knowledge_service.delete_collection(collection_id, current_user["id"])
+        if not success:
+            raise HTTPException(status_code=404, detail="Collection not found")
+        return {"message": "Collection deleted successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/knowledge/search", response_model=RAGSearchResponse)
+async def search_knowledge_base(
+    search_request: RAGSearchRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """Search the knowledge base using RAG"""
+    try:
+        results = await knowledge_service.search_knowledge_base(
+            query=search_request.query,
+            user_id=current_user["id"],
+            collection_ids=search_request.collection_ids,
+            limit=search_request.limit,
+            similarity_threshold=search_request.similarity_threshold
+        )
+        return results
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 # ==================== BACKGROUND TASKS ====================
 
 async def process_voice_transcription(message_id: str, audio_url: str):
@@ -428,17 +600,24 @@ async def process_voice_transcription(message_id: str, audio_url: str):
             await db_service.update_voice_job(job_id, "failed", error_message=str(e))
 
 async def process_ai_response_generation(message_id: str):
-    """Background task to generate AI response"""
+    """Background task to generate AI response with RAG"""
     try:
         # Get the message with transcription
         message = await db_service.get_message(message_id)
         if not message or not message.voice_transcription:
             return
         
-        # Generate AI response using OpenAI
+        # Get the session to get user_id for RAG
+        session = await db_service.get_session(message.session_id, None)  # No user_id check for background task
+        if not session:
+            return
+        
+        # Generate AI response using OpenAI with RAG
         ai_response = await ai_service.generate_response(
             user_message=message.voice_transcription,
-            session_id=message.session_id
+            session_id=message.session_id,
+            use_rag=True,
+            user_id=session["user_id"]
         )
         
         # Select appropriate voice for the response

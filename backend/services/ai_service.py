@@ -8,6 +8,7 @@ import json
 from typing import Optional, Dict, Any, List, AsyncGenerator
 from datetime import datetime
 from openai import AsyncOpenAI
+from services.knowledge_service import KnowledgeService
 
 class AIService:
     def __init__(self):
@@ -16,6 +17,7 @@ class AIService:
         self.default_model = "gpt-4o-mini"  # More cost-effective than gpt-4
         self.max_tokens = 1000
         self.temperature = 0.7
+        self.knowledge_service = KnowledgeService()
         
     async def generate_response(
         self, 
@@ -23,9 +25,12 @@ class AIService:
         session_id: str,
         model: Optional[str] = None,
         temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None
+        max_tokens: Optional[int] = None,
+        use_rag: bool = True,
+        user_id: Optional[str] = None,
+        collection_ids: Optional[List[str]] = None
     ) -> str:
-        """Generate AI response using OpenAI API"""
+        """Generate AI response using OpenAI API with optional RAG"""
         try:
             model = model or self.default_model
             temperature = temperature or self.temperature
@@ -34,8 +39,26 @@ class AIService:
             # Get conversation context
             context = await self._get_conversation_context(session_id)
             
+            # Get relevant knowledge if RAG is enabled
+            knowledge_context = ""
+            if use_rag and user_id:
+                try:
+                    rag_results = await self.knowledge_service.search_knowledge_base(
+                        query=user_message,
+                        user_id=user_id,
+                        collection_ids=collection_ids,
+                        limit=3,
+                        similarity_threshold=0.7
+                    )
+                    
+                    if rag_results.results:
+                        knowledge_context = self._build_knowledge_context(rag_results.results)
+                except Exception as e:
+                    print(f"Error retrieving knowledge context: {e}")
+                    # Continue without knowledge context
+            
             # Build the prompt
-            prompt = self._build_prompt(user_message, context)
+            prompt = self._build_prompt(user_message, context, knowledge_context)
             
             # Use OpenAI client
             response = await self.client.chat.completions.create(
@@ -43,7 +66,7 @@ class AIService:
                 messages=[
                     {
                         "role": "system",
-                        "content": self._get_system_prompt()
+                        "content": self._get_system_prompt(use_rag=use_rag)
                     },
                     {
                         "role": "user",
@@ -67,9 +90,12 @@ class AIService:
         # For now, return empty context
         return []
     
-    def _build_prompt(self, user_message: str, context: List[Dict[str, str]]) -> str:
+    def _build_prompt(self, user_message: str, context: List[Dict[str, str]], knowledge_context: str = "") -> str:
         """Build the prompt for the AI model"""
         prompt = f"Customer message: {user_message}\n\n"
+        
+        if knowledge_context:
+            prompt += f"Relevant knowledge from knowledge base:\n{knowledge_context}\n\n"
         
         if context:
             prompt += "Previous conversation context:\n"
@@ -77,11 +103,13 @@ class AIService:
                 prompt += f"{msg['role']}: {msg['content']}\n"
         
         prompt += "\nPlease provide a helpful, professional response to the customer's message."
+        if knowledge_context:
+            prompt += " Use the provided knowledge to give accurate and helpful information."
         return prompt
     
-    def _get_system_prompt(self) -> str:
+    def _get_system_prompt(self, use_rag: bool = False) -> str:
         """Get the system prompt for the AI model"""
-        return """You are a helpful customer service representative for VoiceFlow AI. 
+        base_prompt = """You are a helpful customer service representative for VoiceFlow AI. 
         
 Your role is to:
 1. Provide helpful, accurate, and professional responses to customer inquiries
@@ -99,24 +127,64 @@ Guidelines:
 - End responses with a question to encourage further engagement when appropriate
 
 Remember: You're representing a voice AI company, so be knowledgeable about AI, voice technology, and customer service best practices."""
+        
+        if use_rag:
+            base_prompt += """
+
+IMPORTANT: When relevant knowledge from the knowledge base is provided, use it to give accurate and helpful information. Always prioritize information from the knowledge base when it's relevant to the customer's question. If the knowledge base information doesn't directly answer the question, use it as context to provide a more informed response."""
+        
+        return base_prompt
+    
+    def _build_knowledge_context(self, rag_results: List[Any]) -> str:
+        """Build knowledge context from RAG search results"""
+        if not rag_results:
+            return ""
+        
+        context_parts = []
+        for i, result in enumerate(rag_results, 1):
+            context_parts.append(f"Source {i} (from {result.document_title}):\n{result.content}\n")
+        
+        return "\n".join(context_parts)
     
     async def generate_response_with_streaming(
         self, 
         user_message: str, 
         session_id: str,
-        model: Optional[str] = None
+        model: Optional[str] = None,
+        use_rag: bool = True,
+        user_id: Optional[str] = None,
+        collection_ids: Optional[List[str]] = None
     ) -> AsyncGenerator[str, None]:
         """Generate AI response with streaming for real-time display"""
         try:
             model = model or self.default_model
             context = await self._get_conversation_context(session_id)
-            prompt = self._build_prompt(user_message, context)
+            
+            # Get relevant knowledge if RAG is enabled
+            knowledge_context = ""
+            if use_rag and user_id:
+                try:
+                    rag_results = await self.knowledge_service.search_knowledge_base(
+                        query=user_message,
+                        user_id=user_id,
+                        collection_ids=collection_ids,
+                        limit=3,
+                        similarity_threshold=0.7
+                    )
+                    
+                    if rag_results.results:
+                        knowledge_context = self._build_knowledge_context(rag_results.results)
+                except Exception as e:
+                    print(f"Error retrieving knowledge context: {e}")
+                    # Continue without knowledge context
+            
+            prompt = self._build_prompt(user_message, context, knowledge_context)
             
             # Use OpenAI streaming
             stream = await self.client.chat.completions.create(
                 model=model,
                 messages=[
-                    {"role": "system", "content": self._get_system_prompt()},
+                    {"role": "system", "content": self._get_system_prompt(use_rag=use_rag)},
                     {"role": "user", "content": prompt}
                 ],
                 temperature=self.temperature,
