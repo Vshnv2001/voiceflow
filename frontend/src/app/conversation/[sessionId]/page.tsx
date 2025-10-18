@@ -199,6 +199,16 @@ export default function ConversationPage() {
                 }))
               }
               break
+            
+            case 'audio_complete':
+              // Handle complete MP3 audio from TTS
+              const audioData = message.audio_data
+              const format = message.format
+              if (audioData) {
+                console.log(`Received complete ${format} audio, size: ${audioData.length} chars`)
+                await playCompleteAudio(audioData, format)
+              }
+              break
               
             default:
               console.log("Unhandled message type:", messageType)
@@ -310,15 +320,28 @@ export default function ConversationPage() {
       // Decode base64 to binary string
       const binaryString = atob(base64Audio)
       
-      // Convert binary string to Int16Array (PCM data)
-      const len = binaryString.length
-      const bytes = new Uint8Array(len)
-      for (let i = 0; i < len; i++) {
-        bytes[i] = binaryString.charCodeAt(i)
+      // Get length and ensure it's even (required for 16-bit PCM)
+      let len = binaryString.length
+      if (len % 2 !== 0) {
+        console.warn('Audio chunk has odd length, padding with zero byte')
+        len += 1
       }
       
-      // Create Int16Array from the bytes
-      const pcmData = new Int16Array(bytes.buffer)
+      // Create a properly aligned ArrayBuffer for Int16Array
+      const buffer = new ArrayBuffer(len)
+      const bytes = new Uint8Array(buffer)
+      
+      // Fill the buffer
+      for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i)
+      }
+      // Pad with zero if length was odd
+      if (len > binaryString.length) {
+        bytes[binaryString.length] = 0
+      }
+      
+      // Now we can safely create Int16Array from the aligned buffer
+      const pcmData = new Int16Array(buffer)
       
       // Create audio context
       const audioContext = new AudioContext({ sampleRate: 16000 })
@@ -346,6 +369,51 @@ export default function ConversationPage() {
       })
     } catch (error) {
       console.error("Error playing audio:", error)
+    }
+  }
+
+  // Play complete audio (MP3 format) from TTS
+  const playCompleteAudio = async (base64Audio: string, format: string) => {
+    try {
+      setStatusMessage("Playing response...")
+      setIsProcessing(true)
+      
+      // Decode base64 to binary
+      const binaryString = atob(base64Audio)
+      const bytes = new Uint8Array(binaryString.length)
+      for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i)
+      }
+      
+      // Create a Blob from the binary data
+      const blob = new Blob([bytes], { type: `audio/${format}` })
+      const audioUrl = URL.createObjectURL(blob)
+      
+      // Create audio element and play
+      const audio = new Audio(audioUrl)
+      
+      return new Promise<void>((resolve, reject) => {
+        audio.onended = () => {
+          URL.revokeObjectURL(audioUrl)
+          setIsProcessing(false)
+          setStatusMessage("Ready - Speak again!")
+          resolve()
+        }
+        
+        audio.onerror = (error) => {
+          console.error("Error playing MP3 audio:", error)
+          URL.revokeObjectURL(audioUrl)
+          setIsProcessing(false)
+          setStatusMessage("Error playing audio")
+          reject(error)
+        }
+        
+        audio.play().catch(reject)
+      })
+    } catch (error) {
+      console.error("Error in playCompleteAudio:", error)
+      setIsProcessing(false)
+      setStatusMessage("Error playing audio")
     }
   }
   
