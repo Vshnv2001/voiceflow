@@ -74,6 +74,19 @@ async def create_session(
         return session
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    
+
+@app.post("/api/sessions/{session_id}/close", response_model=SessionResponse)
+async def close_session(
+    session_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Close a session"""
+    try:
+        await db_service.close_session(session_id, current_user["id"])
+        return {"message": "Session closed successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/sessions", response_model=List[SessionResponse])
 async def get_sessions(
