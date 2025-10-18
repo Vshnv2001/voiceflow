@@ -243,6 +243,7 @@ async def get_pending_messages(
 async def approve_message(
     message_id: str,
     approval_data: AgentApprovalRequest,
+    background_tasks: BackgroundTasks,
     current_user: dict = Depends(get_current_user)
 ):
     """Approve or edit an AI-generated message"""
