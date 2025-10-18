@@ -4,16 +4,19 @@ Authentication service for Supabase Auth integration
 
 import jwt
 import os
+from dotenv import load_dotenv
 from typing import Optional, Dict, Any
 from datetime import datetime, timedelta
 from supabase import create_client, Client
+
+load_dotenv()
 
 class AuthService:
     def __init__(self):
         self.supabase_url = os.getenv("SUPABASE_URL")
         self.supabase_key = os.getenv("SUPABASE_ANON_KEY")
         self.supabase: Client = create_client(self.supabase_url, self.supabase_key)
-        self.jwt_secret = os.getenv("JWT_SECRET", "your-jwt-secret")
+        self.jwt_secret = os.getenv("JWT_SECRET")
     
     async def verify_token(self, token: str) -> Dict[str, Any]:
         """Verify JWT token and return user data"""
