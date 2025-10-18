@@ -16,6 +16,7 @@ import {
 import Navigation from "@/components/Navigation"
 import { useSessionStatus } from "@/hooks/useSessionStatus"
 import { useAuth } from "@/contexts/AuthContext"
+import { supabase } from "@/lib/supabase"
 
 interface Message {
   id: string
@@ -44,6 +45,7 @@ export default function AgentConversationPage() {
   const [messages, setMessages] = useState<Message[]>([])
   const scrollAreaRef = useRef<HTMLDivElement>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const previousMessageCountRef = useRef<number>(0)
   
   // Suggested responses
   const [suggestedResponses, setSuggestedResponses] = useState([
@@ -56,68 +58,108 @@ export default function AgentConversationPage() {
   const [selectedSuggestion, setSelectedSuggestion] = useState<string | null>(null)
   const [editingSuggestion, setEditingSuggestion] = useState("")
 
-  // Load dummy messages
+  // Load transcripts from database and set up aggressive real-time polling
   useEffect(() => {
-    if (session?.status === 'active') {
-      // Dummy messages for testing
-      setMessages([
-        {
-          id: '1',
-          speaker: 'system',
-          content: `Call started with ${session.customer_name || 'Customer'}`,
-          timestamp: new Date(session.created_at),
-          type: 'system'
-        },
-        {
-          id: '2',
-          speaker: 'customer',
-          content: "Hi, I need help with my recent order. It hasn't arrived yet.",
-          timestamp: new Date(Date.now() - 120000),
-          type: 'text'
-        },
-        {
-          id: '3',
-          speaker: 'agent',
-          content: "Hello! I'd be happy to help you with your order. Could you please provide your order number?",
-          timestamp: new Date(Date.now() - 110000),
-          type: 'text'
-        },
-        {
-          id: '4',
-          speaker: 'customer',
-          content: "Sure, it's #ORD-12345",
-          timestamp: new Date(Date.now() - 95000),
-          type: 'text'
-        },
-        {
-          id: '5',
-          speaker: 'agent',
-          content: "Thank you! Let me pull up your order details. I can see your order was placed on March 15th. What seems to be the issue?",
-          timestamp: new Date(Date.now() - 85000),
-          type: 'text'
-        },
-        {
-          id: '6',
-          speaker: 'customer',
-          content: "I was expecting it to arrive last week but it still hasn't shown up.",
-          timestamp: new Date(Date.now() - 70000),
-          type: 'text'
-        },
-        {
-          id: '7',
-          speaker: 'agent',
-          content: "I understand your concern. Let me check the shipping status for you right away.",
-          timestamp: new Date(Date.now() - 60000),
-          type: 'text'
-        },
-      ])
+    if (!sessionId) {
       setLoading(false)
+      return
     }
-  }, [session?.status, session?.created_at, session?.customer_name])
 
-  // Auto-scroll to bottom when new messages arrive
+    const loadTranscripts = async () => {
+      try {
+        const { data, error } = await supabase
+          .from('sessions')
+          .select('transcripts, customer_name, created_at')
+          .eq('id', sessionId)
+          .single()
+
+        if (error) {
+          console.error('Error loading transcripts:', error)
+          setLoading(false)
+          return
+        }
+
+        // Convert database transcripts to message format
+        const formattedMessages: Message[] = [
+          {
+            id: 'system-1',
+            speaker: 'system',
+            content: `Call started with ${data.customer_name || 'Customer'}`,
+            timestamp: new Date(data.created_at),
+            type: 'system'
+          }
+        ]
+
+        if (data.transcripts && Array.isArray(data.transcripts)) {
+          data.transcripts.forEach((entry: any, index: number) => {
+            formattedMessages.push({
+              id: `transcript-${index}`,
+              speaker: entry.speaker === 'user' ? 'customer' : 'agent',
+              content: entry.text,
+              timestamp: new Date(entry.timestamp),
+              type: 'text'
+            })
+          })
+        }
+
+        setMessages(formattedMessages)
+        setLoading(false)
+      } catch (err) {
+        console.error('Failed to load transcripts:', err)
+        setLoading(false)
+      }
+    }
+
+    // Initial load
+    loadTranscripts()
+
+    // Aggressive polling every 500ms for real-time updates
+    console.log('🔄 Starting aggressive polling for agent conversation')
+    const pollInterval = setInterval(() => {
+      loadTranscripts()
+    }, 500)
+
+    // Set up real-time subscription as backup
+    const channel = supabase
+      .channel(`session-${sessionId}-transcripts`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'sessions',
+          filter: `id=eq.${sessionId}`
+        },
+        (payload: any) => {
+          console.log('🔔 Real-time update received, reloading transcripts')
+          loadTranscripts()
+        }
+      )
+      .subscribe()
+
+    return () => {
+      console.log('🧹 Cleaning up polling and subscription')
+      clearInterval(pollInterval)
+      supabase.removeChannel(channel)
+    }
+  }, [sessionId])
+
+  // Smart auto-scroll: only scroll when NEW messages arrive (not on every re-render)
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
+    const currentCount = messages.length
+    const previousCount = previousMessageCountRef.current
+
+    // Only scroll if there are NEW messages (count increased)
+    // Skip on initial load (previousCount === 0) to prevent auto-scroll on page load
+    if (currentCount > previousCount && previousCount > 0) {
+      console.log('📜 New message detected, auto-scrolling to bottom')
+      setTimeout(() => {
+        messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
+      }, 100)
+    }
+
+    // Update the reference
+    previousMessageCountRef.current = currentCount
   }, [messages])
 
   // Call duration timer
