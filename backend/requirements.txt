@@ -1,0 +1,56 @@
+# VoiceFlow AI Backend Dependencies
+
+# FastAPI and ASGI server
+fastapi
+uvicorn[standard]
+python-multipart
+
+# Database and Supabase
+supabase
+postgrest
+storage3
+supabase_auth
+supabase_functions
+
+# HTTP client for external APIs
+aiohttp
+httpx
+
+# Authentication and security
+python-jose[cryptography]
+passlib[bcrypt]
+python-multipart
+
+# Environment and configuration
+python-dotenv
+pydantic
+pydantic-settings
+
+# Audio processing
+librosa
+soundfile
+pydub
+
+# AI and ML
+openai
+groq
+
+# Background tasks
+celery
+redis
+
+# Monitoring and logging
+structlog
+sentry-sdk[fastapi]
+
+# Development and testing
+pytest
+pytest-asyncio
+pytest-cov
+black
+isort
+flake8
+
+# Utilities
+python-dateutil
+pytz
