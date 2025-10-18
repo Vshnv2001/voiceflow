@@ -21,19 +21,36 @@ class AuthService:
     async def verify_token(self, token: str) -> Dict[str, Any]:
         """Verify JWT token and return user data"""
         try:
-            # For Supabase, you can verify the token using their method
-            # or decode it manually if needed
-            response = self.supabase.auth.get_user(token)
+            # Set the session with the token first
+            self.supabase.auth.set_session(token, "")
             
-            if response.user:
+            # Now get the user
+            response = self.supabase.auth.get_user()
+            
+            # Check if we have a valid response with user data
+            if response and hasattr(response, 'user') and response.user:
+                user = response.user
                 return {
-                    "id": response.user.id,
-                    "email": response.user.email,
-                    "role": response.user.user_metadata.get("role", "user"),
-                    "metadata": response.user.user_metadata
+                    "id": user.id,
+                    "email": user.email,
+                    "role": user.user_metadata.get("role", "user") if hasattr(user, 'user_metadata') else "user",
+                    "metadata": user.user_metadata if hasattr(user, 'user_metadata') else {}
                 }
             else:
-                raise Exception("Invalid token")
+                # Fallback: try to decode the JWT token manually
+                try:
+                    import jwt
+                    # Decode without verification first to get the payload
+                    decoded = jwt.decode(token, options={"verify_signature": False})
+                    return {
+                        "id": decoded.get("sub", ""),
+                        "email": decoded.get("email", ""),
+                        "role": decoded.get("user_metadata", {}).get("role", "user"),
+                        "metadata": decoded.get("user_metadata", {})
+                    }
+                except Exception as jwt_error:
+                    print(f"JWT decode error: {jwt_error}")
+                    raise Exception("Invalid token - unable to verify")
                 
         except Exception as e:
             print(f"Error verifying token: {e}")

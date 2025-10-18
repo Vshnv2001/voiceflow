@@ -116,10 +116,10 @@ async def get_sessions(
     offset: int = 0,
     current_user: dict = Depends(get_current_user)
 ):
-    """Get user's sessions with optional filtering"""
+    """Get customer rep's sessions with optional filtering"""
     try:
         sessions = await db_service.get_sessions(
-            user_id=current_user["id"],
+            customer_rep_id=current_user["id"],
             status=status,
             limit=limit,
             offset=offset
@@ -495,8 +495,8 @@ async def upload_document(
         )
         
         return DocumentUploadResponse(
-            document_id=document.id,
-            file_url=document.file_url,
+            document_id=document['id'],
+            file_url=document['file_url'],
             status="processing",
             message="Document uploaded successfully and is being processed"
         )
@@ -660,8 +660,8 @@ async def process_ai_response_generation(message_id: str):
         if not message or not message.voice_transcription:
             return
         
-        # Get the session to get user_id for RAG
-        session = await db_service.get_session(message.session_id, None)  # No user_id check for background task
+        # Get the session to get customer_rep_id for RAG
+        session = await db_service.get_session(message.session_id, None)  # No customer_rep_id check for background task
         if not session:
             return
         
@@ -670,7 +670,7 @@ async def process_ai_response_generation(message_id: str):
             user_message=message.voice_transcription,
             session_id=message.session_id,
             use_rag=True,
-            user_id=session["user_id"]
+            user_id=session["customer_rep_id"]
         )
         
         # Select appropriate voice for the response

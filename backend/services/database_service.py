@@ -55,7 +55,7 @@ class DatabaseService:
     async def get_session(self, session_id: str, user_id: str) -> Optional[Dict[str, Any]]:
         """Get a session by ID"""
         try:
-            result = self.supabase.table("sessions").select("*").eq("id", session_id).eq("user_id", user_id).execute()
+            result = self.supabase.table("sessions").select("*").eq("id", session_id).eq("customer_rep_id", customer_rep_id).execute()
             return result.data[0] if result.data else None
             
         except Exception as e:
@@ -64,14 +64,14 @@ class DatabaseService:
     
     async def get_sessions(
         self, 
-        user_id: str, 
+        customer_rep_id: str, 
         status: Optional[str] = None,
         limit: int = 50,
         offset: int = 0
     ) -> List[Dict[str, Any]]:
-        """Get user's sessions with optional filtering"""
+        """Get customer rep's sessions with optional filtering"""
         try:
-            query = self.supabase.table("sessions").select("*").eq("user_id", user_id)
+            query = self.supabase.table("sessions").select("*").eq("customer_rep_id", customer_rep_id)
             
             if status:
                 query = query.eq("status", status)
@@ -126,22 +126,22 @@ class DatabaseService:
     async def update_session(
         self, 
         session_id: str, 
-        user_id: str, 
+        customer_rep_id: str, 
         **updates
     ) -> bool:
         """Update a session"""
         try:
-            result = self.supabase.table("sessions").update(updates).eq("id", session_id).eq("user_id", user_id).execute()
+            result = self.supabase.table("sessions").update(updates).eq("id", session_id).eq("customer_rep_id", customer_rep_id).execute()
             return len(result.data) > 0
             
         except Exception as e:
             print(f"Error updating session: {e}")
             return False
         
-    async def close_session(self, session_id: str, user_id: str) -> bool:
+    async def close_session(self, session_id: str, customer_rep_id: str) -> bool:
         """Close a session"""
         try:
-            result = self.supabase.table("sessions").update({"status": "closed"}).eq("id", session_id).eq("user_id", user_id).execute()
+            result = self.supabase.table("sessions").update({"status": "closed"}).eq("id", session_id).eq("customer_rep_id", customer_rep_id).execute()
             return len(result.data) > 0
         except Exception as e:
             print(f"Error closing session: {e}")
@@ -288,15 +288,15 @@ class DatabaseService:
             print(f"Error creating voice job: {e}")
             raise Exception(f"Failed to create voice job: {str(e)}")
     
-    async def get_voice_job(self, job_id: str, user_id: str) -> Optional[Dict[str, Any]]:
+    async def get_voice_job(self, job_id: str, customer_rep_id: str) -> Optional[Dict[str, Any]]:
         """Get a voice processing job"""
         try:
             result = self.supabase.table("voice_processing_jobs").select("*, messages(sessions(*))").eq("id", job_id).execute()
             
             if result.data:
-                # Check if user has access to this job
+                # Check if customer rep has access to this job
                 job = result.data[0]
-                if job["messages"]["sessions"]["user_id"] == user_id:
+                if job["messages"]["sessions"]["customer_rep_id"] == customer_rep_id:
                     return job
             
             return None
@@ -436,13 +436,13 @@ class DatabaseService:
     
     async def get_session_analytics(
         self, 
-        user_id: str,
+        customer_rep_id: str,
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None
     ) -> Dict[str, Any]:
-        """Get analytics for user sessions"""
+        """Get analytics for customer rep sessions"""
         try:
-            query = self.supabase.table("sessions").select("*").eq("user_id", user_id)
+            query = self.supabase.table("sessions").select("*").eq("customer_rep_id", customer_rep_id)
             
             if start_date:
                 query = query.gte("created_at", start_date.isoformat())
@@ -596,15 +596,63 @@ class DatabaseService:
             print(f"Error getting knowledge documents: {e}")
             return []
     
+    def _parse_storage_path(self, stored: str) -> tuple[Optional[str], Optional[str]]:
+        if not stored:
+            return None, None
+        # if you ever stored a full URL, skip parsing
+        if "://" in stored:
+            return None, None
+        parts = stored.split("/", 1)
+        if len(parts) != 2:
+            return None, None
+        return parts[0], parts[1]  # bucket, path
+
+
     async def delete_knowledge_document(self, document_id: str, user_id: str) -> bool:
-        """Delete a knowledge document"""
+        """Delete a knowledge document + its storage object."""
         try:
-            result = self.supabase.table("knowledge_documents").delete().eq("id", document_id).eq("user_id", user_id).execute()
-            return len(result.data) > 0
-            
+            # 1) Fetch the row to learn the storage path before deletion
+            doc_res = (
+                self.supabase
+                .table("knowledge_documents")
+                .select("id, file_url")
+                .eq("id", document_id)
+                .eq("user_id", user_id)
+                .single()
+                .execute()
+            )
+            doc = doc_res.data
+            if not doc:
+                return False
+
+            # 2) Delete the row and force representation to get reliable data back
+            del_res = (
+                self.supabase
+                .table("knowledge_documents")
+                .delete()
+                .eq("id", document_id)
+                .eq("user_id", user_id)
+                .select("id")                  # <— THIS forces return=representation
+                .execute()
+            )
+            deleted = bool(del_res.data)       # now this is trustworthy
+
+            # 3) Best-effort removal from Storage (after DB delete)
+            if deleted and doc.get("file_url"):
+                bucket, path = self._parse_storage_path(doc["file_url"])
+                if bucket and path:
+                    try:
+                        self.supabase.storage.from_(bucket).remove([path])
+                    except Exception as se:
+                        # don't fail the whole operation; log and move on
+                        print(f"Storage remove failed for {bucket}/{path}: {se}")
+
+            return deleted
+
         except Exception as e:
             print(f"Error deleting knowledge document: {e}")
             return False
+
     
     async def create_knowledge_chunk(
         self,

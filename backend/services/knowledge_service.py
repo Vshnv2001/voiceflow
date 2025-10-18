@@ -5,9 +5,12 @@ Knowledge Base Service for document upload, processing, and RAG functionality
 import asyncio
 import os
 import uuid
+import traceback
 import hashlib
+import mimetypes
 from typing import List, Dict, Any, Optional, Tuple
-from datetime import datetime
+from supabase import create_client, Client
+from datetime import datetime, timezone
 import aiofiles
 import aiohttp
 from openai import AsyncOpenAI
@@ -29,10 +32,88 @@ class KnowledgeService:
         self.openai_api_key = os.getenv("OPENAI_API_KEY")
         self.client = AsyncOpenAI(api_key=self.openai_api_key)
         self.db_service = DatabaseService()
+        self.sb_url = os.getenv("SUPABASE_URL")
+        self.sb_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")  # server only
+        if not self.sb_url or not self.sb_key:
+            raise RuntimeError("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY")
+        self.sb: Client = create_client(self.sb_url, self.sb_key)
+
+        self.bucket = os.getenv("SUPABASE_KB_BUCKET", "knowledge-base")
+        # Optional: ensure the bucket exists (once)
+        try:
+            # supabase-py is sync; call in a thread to keep async flow clean
+            asyncio.get_event_loop().run_until_complete(self._ensure_bucket_exists())
+        except RuntimeError:
+            # If already in an event loop, just schedule it (or ignore if you create bucket out-of-band)
+            asyncio.create_task(self._ensure_bucket_exists())
+
         self.embedding_model = "text-embedding-3-small"  # 1536 dimensions
         self.chunk_size = 1000  # Characters per chunk
         self.chunk_overlap = 200  # Overlap between chunks
         
+    async def _ensure_bucket_exists(self):
+        """
+        One-time creation; safe to call multiple times.
+        If you create the bucket via dashboard/CLI, you can skip this.
+        """
+        def _create_if_missing():
+            existing = self.sb.storage.list_buckets()
+            if not any(b.name == self.bucket for b in existing):
+                # private bucket (recommended)
+                self.sb.storage.create_bucket(self.bucket)
+        await asyncio.to_thread(_create_if_missing)
+
+    def _make_storage_path(self, user_id: str, filename: str) -> str:
+        # path inside the bucket
+        return f"{user_id}/{filename}"
+
+    async def _upload_to_storage(self, file_content: bytes, filename: str, user_id: str) -> str:
+        """
+        Uploads to a private bucket and returns a canonical storage path.
+        We *don’t* return a public URL; we’ll sign on read.
+        """
+        path_in_bucket = self._make_storage_path(user_id, filename)
+        content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+
+        def _upload():
+            # supabase-py requires bytes/IO; also supports `upsert`
+            self.sb.storage.from_(self.bucket).upload(
+                path=path_in_bucket,
+                file=file_content,                 # raw bytes OK
+                file_options={"contentType": content_type, "upsert": False}
+            )
+        await asyncio.to_thread(_upload)
+
+        # Store as "bucket/path" in DB (easy to parse later)
+        return f"{self.bucket}/{path_in_bucket}"
+
+    async def _maybe_sign_storage_url(self, stored: Optional[str], expires_in: int = 3600) -> Optional[str]:
+        """
+        Turn a stored "bucket/path" into a signed URL. If the bucket is public you
+        could instead return get_public_url, but private+signed is safer.
+        """
+        if not stored:
+            return None
+        if "://" in stored:
+            # already a URL (legacy), return as is
+            return stored
+
+        try:
+            bucket, *rest = stored.split("/", 1)
+            if not rest:
+                return None
+            path_in_bucket = rest[0]
+
+            def _sign():
+                return self.sb.storage.from_(bucket).create_signed_url(path_in_bucket, expires_in)
+
+            signed = await asyncio.to_thread(_sign)
+            # supabase-py returns {"signedURL": "...", "path": "..."} in v2
+            return signed.get("signedURL") or signed.get("signed_url") or signed  # handle different client shapes
+        except Exception as e:
+            print(f"Failed to sign storage URL for {stored}: {e}")
+            return None
+
     async def upload_document(
         self, 
         file_content: bytes, 
@@ -42,20 +123,23 @@ class KnowledgeService:
         description: Optional[str] = None,
         collection_ids: Optional[List[str]] = None
     ) -> KnowledgeDocumentResponse:
-        """Upload and process a document for the knowledge base"""
         try:
-            # Determine file type
             file_type = self._get_file_type(file_name)
             file_size = len(file_content)
-            
-            # Generate unique file name
+
+            # Stable unique name (you already have this)
             file_hash = hashlib.md5(file_content).hexdigest()
             unique_filename = f"{file_hash}_{file_name}"
-            
-            # Upload file to storage (using Supabase storage)
-            file_url = await self._upload_to_storage(file_content, unique_filename)
-            
-            # Create document record
+
+            # --- CHANGED: upload to storage & get canonical storage path ---
+            storage_path = await self._upload_to_storage(
+                file_content=file_content,
+                filename=unique_filename,
+                user_id=user_id
+            )
+            # Note: we store the storage *path* in file_url (not a signed URL)
+            # e.g., "knowledge-base/<user_id>/2025/10/18/<hash>_file.pdf"
+
             document = await self.db_service.create_knowledge_document(
                 user_id=user_id,
                 title=title,
@@ -63,24 +147,22 @@ class KnowledgeService:
                 file_name=file_name,
                 file_type=file_type,
                 file_size=file_size,
-                file_url=file_url
+                file_url=storage_path  # <-- store path, not public URL
             )
-            
-            # Add to collections if specified
+
             if collection_ids:
                 for collection_id in collection_ids:
                     await self.db_service.add_document_to_collection(
-                        document_id=document.id,
+                        document_id=document["id"],
                         collection_id=collection_id
                     )
-            
-            # Start background processing
-            asyncio.create_task(self._process_document(document.id, file_content, file_type))
-            
+
+            asyncio.create_task(self._process_document(document["id"], file_content, file_type))
             return document
-            
+
         except Exception as e:
             print(f"Error uploading document: {e}")
+            print(traceback.format_exc())
             raise e
     
     async def _process_document(self, document_id: str, file_content: bytes, file_type: str):
@@ -215,23 +297,15 @@ class KnowledgeService:
     async def _generate_embedding(self, text: str) -> List[float]:
         """Generate embedding for text using OpenAI"""
         try:
+            print("Trying to generate embeddings")
             response = await self.client.embeddings.create(
                 model=self.embedding_model,
                 input=text
             )
+            print("Embeddings generated successfully")
             return response.data[0].embedding
         except Exception as e:
             print(f"Error generating embedding: {e}")
-            raise e
-    
-    async def _upload_to_storage(self, file_content: bytes, filename: str) -> str:
-        """Upload file to Supabase storage"""
-        try:
-            # This would integrate with your Supabase storage
-            # For now, return a placeholder URL
-            return f"https://your-storage-bucket.supabase.co/storage/v1/object/public/knowledge-base/{filename}"
-        except Exception as e:
-            print(f"Error uploading to storage: {e}")
             raise e
     
     def _get_file_type(self, filename: str) -> str:
@@ -299,30 +373,33 @@ class KnowledgeService:
             raise e
     
     async def get_documents(
-        self, 
-        user_id: str, 
-        collection_id: Optional[str] = None,
-        status: Optional[str] = None,
-        limit: int = 50,
-        offset: int = 0
+        self, user_id: str, collection_id: Optional[str] = None,
+        status: Optional[str] = None, limit: int = 50, offset: int = 0
     ) -> List[KnowledgeDocumentResponse]:
-        """Get user's knowledge documents"""
         try:
-            return await self.db_service.get_knowledge_documents(
-                user_id=user_id,
-                collection_id=collection_id,
-                status=status,
-                limit=limit,
-                offset=offset
+            docs = await self.db_service.get_knowledge_documents(
+                user_id=user_id, collection_id=collection_id, status=status, limit=limit, offset=offset
             )
+            # Sign each one (do in parallel)
+            async def sign_one(d):
+                d["signed_file_url"] = await self._maybe_sign_storage_url(d.get("file_url"))
+                return d
+            return await asyncio.gather(*(sign_one(d) for d in docs))
         except Exception as e:
             print(f"Error getting documents: {e}")
             raise e
     
     async def get_document(self, document_id: str, user_id: str) -> Optional[KnowledgeDocumentResponse]:
-        """Get a specific document"""
         try:
-            return await self.db_service.get_knowledge_document(document_id, user_id)
+            doc = await self.db_service.get_knowledge_document(document_id, user_id)
+            if not doc:
+                return None
+            signed = await self._maybe_sign_storage_url(doc.get("file_url"))
+            # Option A: augment response
+            doc["signed_file_url"] = signed
+            # Option B: overwrite file_url with signed (if your UI expects file_url to be clickable)
+            # doc["file_url"] = signed
+            return doc
         except Exception as e:
             print(f"Error getting document: {e}")
             raise e
