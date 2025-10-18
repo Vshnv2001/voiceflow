@@ -11,6 +11,9 @@ from datetime import datetime, timedelta
 import uuid
 import ssl
 import certifi
+import os
+import wave
+import io
 
 from starlette.websockets import WebSocket as StarletteWebSocket, WebSocketDisconnect
 
@@ -40,11 +43,85 @@ class ElevenLabsWebSocketService:
         self._heartbeat_tasks: Dict[str, asyncio.Task] = {}
         self._reconnect_tasks: Dict[str, asyncio.Task] = {}
         
+        # Audio and transcript saving
+        self.test_output_dir = "/Users/chaitanya/Documents/Coding/voiceflow/backend/test_output"
+        self.audio_chunks: Dict[str, list] = {}  # Store audio chunks per connection
+        self.transcript_data: Dict[str, list] = {}  # Store transcript data per connection
+        
     async def wait_until_ready(self, connection_id: str, timeout: float = 10.0):
         evt = self._ready.get(connection_id)
         if evt is None:
             raise ValueError(f"No ready event for {connection_id}")
         await asyncio.wait_for(evt.wait(), timeout=timeout)
+
+    def _save_audio_chunk(self, connection_id: str, audio_base64: str, is_final: bool = False):
+        """Save audio chunk to memory and write to file when final"""
+        if connection_id not in self.audio_chunks:
+            self.audio_chunks[connection_id] = []
+        
+        try:
+            # Decode base64 audio data
+            audio_data = base64.b64decode(audio_base64)
+            self.audio_chunks[connection_id].append(audio_data)
+            
+            if is_final and self.audio_chunks[connection_id]:
+                # Combine all audio chunks and save as WAV file
+                combined_audio = b''.join(self.audio_chunks[connection_id])
+                self._write_wav_file(connection_id, combined_audio)
+                # Clear the chunks after saving
+                self.audio_chunks[connection_id] = []
+                
+        except Exception as e:
+            logger.error(f"Error saving audio chunk for {connection_id}: {e}")
+
+    def _write_wav_file(self, connection_id: str, audio_data: bytes):
+        """Write audio data to WAV file"""
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"audio_response_{connection_id}_{timestamp}.wav"
+            filepath = os.path.join(self.test_output_dir, filename)
+            
+            # Create WAV file with proper headers
+            with wave.open(filepath, 'wb') as wav_file:
+                # Set WAV parameters (ElevenLabs typically uses 24kHz, 16-bit, mono)
+                wav_file.setnchannels(1)  # Mono
+                wav_file.setsampwidth(2)  # 16-bit
+                wav_file.setframerate(24000)  # 24kHz
+                wav_file.writeframes(audio_data)
+            
+            logger.info(f"Saved audio response to {filepath}")
+            
+        except Exception as e:
+            logger.error(f"Error writing WAV file for {connection_id}: {e}")
+
+    def _save_transcript(self, connection_id: str, transcript_text: str, is_final: bool = False):
+        """Save transcript text to file"""
+        if connection_id not in self.transcript_data:
+            self.transcript_data[connection_id] = []
+        
+        self.transcript_data[connection_id].append(transcript_text)
+        
+        if is_final:
+            try:
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = f"transcript_{connection_id}_{timestamp}.txt"
+                filepath = os.path.join(self.test_output_dir, filename)
+                
+                # Combine all transcript parts
+                full_transcript = " ".join(self.transcript_data[connection_id])
+                
+                with open(filepath, 'w', encoding='utf-8') as f:
+                    f.write(f"Transcript for connection {connection_id}\n")
+                    f.write(f"Generated at: {datetime.now().isoformat()}\n")
+                    f.write("-" * 50 + "\n")
+                    f.write(full_transcript)
+                
+                logger.info(f"Saved transcript to {filepath}")
+                # Clear the transcript data after saving
+                self.transcript_data[connection_id] = []
+                
+            except Exception as e:
+                logger.error(f"Error saving transcript for {connection_id}: {e}")
 
     def _create_ssl_context(self) -> ssl.SSLContext:
         if self._ssl_context is None:
@@ -364,11 +441,26 @@ class ElevenLabsWebSocketService:
 
                 etype = (event.get("type") or "").lower()
                 
+                # Handle audio responses
                 if etype in ("agent_response", "audio_response"):
-                    # if the event has an 'is_final' or some end marker, check it here
-                    if event.get("is_final") or event.get("event") == "response_end":
-                        # you can keep an _idle map similar to _ready if you want strict waits
-                        pass
+                    # Check if this is an audio response with base64 data
+                    audio_base64 = event.get("audio_base_64") or event.get("audio")
+                    if audio_base64:
+                        is_final = event.get("is_final", False) or event.get("event") == "response_end"
+                        self._save_audio_chunk(connection_id, audio_base64, is_final)
+                    
+                    # Check for transcript in the same event
+                    transcript = event.get("transcript") or event.get("text")
+                    if transcript:
+                        is_final = event.get("is_final", False) or event.get("event") == "response_end"
+                        self._save_transcript(connection_id, transcript, is_final)
+
+                # Handle separate transcript events
+                elif etype == "transcript":
+                    transcript = event.get("text") or event.get("transcript")
+                    if transcript:
+                        is_final = event.get("is_final", False) or event.get("event") == "response_end"
+                        self._save_transcript(connection_id, transcript, is_final)
 
                 if etype == "conversation_initiation_metadata":
                     evt = self._ready.get(connection_id)
@@ -468,6 +560,8 @@ class ElevenLabsWebSocketService:
 
         self.connection_metadata.pop(connection_id, None)
         self._ready.pop(connection_id, None)
+        self.audio_chunks.pop(connection_id, None)
+        self.transcript_data.pop(connection_id, None)
         logger.info(f"WebSocket connection {connection_id} closed")
 
     # ---------- Introspection ----------
