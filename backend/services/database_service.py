@@ -29,6 +29,7 @@ class DatabaseService:
             data = {
                 "user_id": user_id,
                 "customer_id": customer_id,
+                "status": "active",
                 "metadata": metadata or {}
             }
             
@@ -83,6 +84,15 @@ class DatabaseService:
             
         except Exception as e:
             print(f"Error updating session: {e}")
+            return False
+        
+    async def close_session(self, session_id: str, user_id: str) -> bool:
+        """Close a session"""
+        try:
+            result = self.supabase.table("sessions").update({"status": "closed"}).eq("id", session_id).eq("user_id", user_id).execute()
+            return len(result.data) > 0
+        except Exception as e:
+            print(f"Error closing session: {e}")
             return False
     
     # ==================== MESSAGE OPERATIONS ====================
