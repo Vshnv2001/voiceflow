@@ -14,6 +14,8 @@ class DatabaseService:
     def __init__(self):
         self.supabase_url = os.getenv("SUPABASE_URL")
         self.supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+        if not self.supabase_url or not self.supabase_key:
+            raise RuntimeError("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY")
         self.supabase: Client = create_client(self.supabase_url, self.supabase_key)
     
     # ==================== SESSION OPERATIONS ====================
@@ -60,6 +62,16 @@ class DatabaseService:
             
         except Exception as e:
             print(f"Error getting session: {e}")
+            return None
+    
+    async def get_session_by_id(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """Get a session by ID without customer_rep_id validation (for internal use)"""
+        try:
+            result = self.supabase.table("sessions").select("*").eq("id", session_id).execute()
+            return result.data[0] if result.data else None
+            
+        except Exception as e:
+            print(f"Error getting session by ID: {e}")
             return None
     
     async def get_sessions(
@@ -554,7 +566,8 @@ class DatabaseService:
         file_name: str,
         file_type: str,
         file_size: int,
-        file_url: str
+        file_url: str,
+        elevenlabs_file_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """Create a knowledge document"""
         try:
@@ -566,6 +579,7 @@ class DatabaseService:
                 "file_type": file_type,
                 "file_size": file_size,
                 "file_url": file_url,
+                "elevenlabs_file_id": elevenlabs_file_id,
                 "status": "processing"
             }
             
@@ -581,7 +595,8 @@ class DatabaseService:
         document_id: str,
         content_text: Optional[str] = None,
         status: Optional[str] = None,
-        processing_error: Optional[str] = None
+        processing_error: Optional[str] = None,
+        elevenlabs_file_id: Optional[str] = None
     ) -> bool:
         """Update a knowledge document"""
         try:
@@ -592,6 +607,8 @@ class DatabaseService:
                 update_data["status"] = status
             if processing_error is not None:
                 update_data["processing_error"] = processing_error
+            if elevenlabs_file_id is not None:
+                update_data["elevenlabs_file_id"] = elevenlabs_file_id
             
             result = self.supabase.table("knowledge_documents").update(update_data).eq("id", document_id).execute()
             return len(result.data) > 0
@@ -679,13 +696,14 @@ class DatabaseService:
                 .delete()
                 .eq("id", document_id)
                 .eq("user_id", user_id)
-                .select("id")                  # <— THIS forces return=representation
                 .execute()
             )
-            deleted = bool(del_res.data)       # now this is trustworthy
+            deleted = bool(del_res.data)       # check if any rows were deleted
 
             # 3) Best-effort removal from Storage (after DB delete)
-            if deleted and doc.get("file_url"):
+            # Note: For ElevenLabs integration, file removal is handled by ElevenLabs API
+            # This section is kept for backward compatibility with Supabase storage
+            if deleted and doc.get("file_url") and not doc.get("file_url", "").startswith("elevenlabs://"):
                 bucket, path = self._parse_storage_path(doc["file_url"])
                 if bucket and path:
                     try:
@@ -881,3 +899,74 @@ class DatabaseService:
         except Exception as e:
             print(f"Error removing document from collection: {e}")
             return False
+    
+    # ==================== AGENT OPERATIONS ====================
+    
+    async def create_agent(
+        self,
+        user_id: str,
+        elevenlabs_agent_id: str,
+        agent_name: str,
+        voice_id: str,
+        first_message: str,
+        knowledge_base_file_ids: List[str],
+        status: str = "active"
+    ) -> Dict[str, Any]:
+        """Create an agent record"""
+        try:
+            data = {
+                "user_id": user_id,
+                "elevenlabs_agent_id": elevenlabs_agent_id,
+                "agent_name": agent_name,
+                "voice_id": voice_id,
+                "first_message": first_message,
+                "knowledge_base_file_ids": knowledge_base_file_ids,
+                "status": status
+            }
+            
+            result = self.supabase.table("agents").insert(data).execute()
+            return result.data[0]
+            
+        except Exception as e:
+            print(f"Error creating agent: {e}")
+            raise Exception(f"Failed to create agent: {str(e)}")
+    
+    async def get_agent_by_user_id(self, user_id: str) -> Optional[Dict[str, Any]]:
+        """Get active agent for a user"""
+        try:
+            result = self.supabase.table("agents").select("*").eq("user_id", user_id).eq("status", "active").order("created_at", desc=True).limit(1).execute()
+            return result.data[0] if result.data else None
+            
+        except Exception as e:
+            print(f"Error getting agent by user ID: {e}")
+            return None
+    
+    async def get_agent_by_elevenlabs_id(self, elevenlabs_agent_id: str) -> Optional[Dict[str, Any]]:
+        """Get agent by ElevenLabs agent ID"""
+        try:
+            result = self.supabase.table("agents").select("*").eq("elevenlabs_agent_id", elevenlabs_agent_id).execute()
+            return result.data[0] if result.data else None
+            
+        except Exception as e:
+            print(f"Error getting agent by ElevenLabs ID: {e}")
+            return None
+    
+    async def update_agent_status(self, agent_id: str, status: str) -> bool:
+        """Update agent status"""
+        try:
+            result = self.supabase.table("agents").update({"status": status}).eq("id", agent_id).execute()
+            return len(result.data) > 0
+            
+        except Exception as e:
+            print(f"Error updating agent status: {e}")
+            return False
+    
+    async def get_agent(self, agent_id: str) -> Optional[Dict[str, Any]]:
+        """Get agent by internal ID"""
+        try:
+            result = self.supabase.table("agents").select("*").eq("id", agent_id).execute()
+            return result.data[0] if result.data else None
+            
+        except Exception as e:
+            print(f"Error getting agent: {e}")
+            return None

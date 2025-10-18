@@ -238,9 +238,40 @@ export default function ConversationPage() {
     }
   }
   
+  // Simple resampling function using linear interpolation
+  const resampleAudio = (inputData: Float32Array, inputSampleRate: number, outputSampleRate: number): Float32Array => {
+    if (inputSampleRate === outputSampleRate) {
+      return inputData
+    }
+    
+    const ratio = inputSampleRate / outputSampleRate
+    const outputLength = Math.floor(inputData.length / ratio)
+    const outputData = new Float32Array(outputLength)
+    
+    for (let i = 0; i < outputLength; i++) {
+      const inputIndex = i * ratio
+      const index = Math.floor(inputIndex)
+      const fraction = inputIndex - index
+      
+      if (index + 1 < inputData.length) {
+        // Linear interpolation
+        outputData[i] = inputData[index] * (1 - fraction) + inputData[index + 1] * fraction
+      } else {
+        outputData[i] = inputData[index] || 0
+      }
+    }
+    
+    return outputData
+  }
+  
   // Start capturing audio from microphone and send to ElevenLabs
   const startAudioCapture = (stream: MediaStream, ws: WebSocket) => {
-    const audioContext = new AudioContext({ sampleRate: 16000 })
+    // Get the actual sample rate from the stream's audio track
+    const audioTrack = stream.getAudioTracks()[0]
+    const settings = audioTrack.getSettings()
+    const streamSampleRate = settings.sampleRate || 44100 // fallback to 44100 if not available
+    
+    const audioContext = new AudioContext({ sampleRate: streamSampleRate })
     audioContextRef.current = audioContext
     
     const source = audioContext.createMediaStreamSource(stream)
@@ -254,10 +285,21 @@ export default function ConversationPage() {
       if (ws.readyState === WebSocket.OPEN && !isMuted) {
         const inputData = e.inputBuffer.getChannelData(0)
         
+        // Resample to 16kHz if needed
+        let processedData: Float32Array
+        if (streamSampleRate !== 16000) {
+          // Create a new Float32Array to ensure proper typing
+          const inputArray = new Float32Array(Array.from(inputData as any))
+          processedData = resampleAudio(inputArray, streamSampleRate, 16000)
+        } else {
+          // Create a new Float32Array to ensure proper typing
+          processedData = new Float32Array(Array.from(inputData as any))
+        }
+        
         // Convert float32 to int16 PCM
-        const int16Data = new Int16Array(inputData.length)
-        for (let i = 0; i < inputData.length; i++) {
-          const s = Math.max(-1, Math.min(1, inputData[i]))
+        const int16Data = new Int16Array(processedData.length)
+        for (let i = 0; i < processedData.length; i++) {
+          const s = Math.max(-1, Math.min(1, processedData[i]))
           int16Data[i] = s < 0 ? s * 0x8000 : s * 0x7FFF
         }
         

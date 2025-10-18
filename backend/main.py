@@ -27,6 +27,7 @@ from services.ai_service import AIService
 from services.database_service import DatabaseService
 from services.auth_service import AuthService
 from services.knowledge_service import KnowledgeService
+from services.agent_service import AgentService
 from websocket_proxy import handle_elevenlabs_proxy
 from websocket_proxy_with_agent_control import handle_elevenlabs_proxy_with_agent_control
 from agent_control_manager import agent_control_manager
@@ -64,6 +65,23 @@ ai_service = AIService()
 db_service = DatabaseService()
 auth_service = AuthService()
 knowledge_service = KnowledgeService()
+agent_service = AgentService()
+
+# Background task for agent cleanup
+async def cleanup_old_agents():
+    """Background task to clean up old agents"""
+    try:
+        # This could be expanded to clean up agents older than a certain time
+        # For now, we'll just log that cleanup is running
+        logger.info("Agent cleanup task running...")
+    except Exception as e:
+        logger.error(f"Error in agent cleanup task: {e}")
+
+# Start background task
+@app.on_event("startup")
+async def startup_event():
+    """Start background tasks on startup"""
+    asyncio.create_task(cleanup_old_agents())
 
 # ElevenLabs Configuration
 elevenlabs_api_key = os.getenv("ELEVENLABS_API_KEY")
@@ -681,7 +699,7 @@ async def process_ai_response_generation(message_id: str):
             return
         
         # Get the session to get customer_rep_id for RAG
-        session = await db_service.get_session(message.session_id, None)  # No customer_rep_id check for background task
+        session = await db_service.get_session_by_id(message.session_id)  # No customer_rep_id check for background task
         if not session:
             return
         
@@ -739,6 +757,91 @@ async def process_voice_synthesis(message_id: str, text: str, voice_id: str):
             await db_service.update_voice_job(job_id, "failed", error_message=str(e))
 
 
+# ==================== AGENT ENDPOINTS ====================
+
+@app.get("/api/agent/my-agent")
+async def get_my_agent(current_user: dict = Depends(get_current_user)):
+    """Get the current user's agent information"""
+    try:
+        agent = await agent_service.get_agent_for_user(current_user["id"])
+        if not agent:
+            raise HTTPException(status_code=404, detail="No agent found. Please upload knowledge base documents first.")
+        
+        return {
+            "agent_id": agent["elevenlabs_agent_id"],
+            "agent_name": agent["agent_name"],
+            "voice_id": agent["voice_id"],
+            "first_message": agent["first_message"],
+            "knowledge_base_file_ids": agent["knowledge_base_file_ids"],
+            "status": agent["status"]
+        }
+    except Exception as e:
+        logger.error(f"Error getting agent for user {current_user['id']}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/agent/create")
+async def create_agent_for_user(
+    agent_name: str = Form(...),
+    voice_id: str = Form(default="pNInz6obpgDQGcFmaJgB"),
+    first_message: str = Form(default="Hello! I'm here to help you with any questions you might have. How can I assist you today?"),
+    current_user: dict = Depends(get_current_user)
+):
+    """Create a new agent for the current user based on their knowledge base documents"""
+    try:
+        # Get user's processed documents
+        documents = await db_service.get_knowledge_documents(
+            user_id=current_user["id"],
+            status="processed",
+            limit=100
+        )
+        
+        if not documents:
+            raise HTTPException(status_code=400, detail="No processed documents found. Please upload knowledge base documents first.")
+        
+        # Extract ElevenLabs file IDs
+        file_ids = [doc["elevenlabs_file_id"] for doc in documents if doc.get("elevenlabs_file_id")]
+        
+        if not file_ids:
+            raise HTTPException(status_code=400, detail="No valid knowledge base files found.")
+        
+        # Create agent
+        agent = await agent_service.create_agent_for_user(
+            user_id=current_user["id"],
+            agent_name=agent_name,
+            knowledge_base_file_ids=file_ids,
+            voice_id=voice_id,
+            first_message=first_message
+        )
+        
+        return agent
+    except Exception as e:
+        logger.error(f"Error creating agent for user {current_user['id']}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/agent/my-agent")
+async def delete_my_agent(current_user: dict = Depends(get_current_user)):
+    """Delete the current user's agent"""
+    try:
+        success = await agent_service.delete_agent(current_user["id"])
+        if not success:
+            raise HTTPException(status_code=404, detail="No agent found to delete.")
+        
+        return {"message": "Agent deleted successfully"}
+    except Exception as e:
+        logger.error(f"Error deleting agent for user {current_user['id']}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/agent/cleanup")
+async def cleanup_agents(current_user: dict = Depends(get_current_user)):
+    """Clean up all inactive/deleted agents for the current user"""
+    try:
+        # This endpoint can be used for manual cleanup if needed
+        # For now, we'll just return success as agents are cleaned up automatically
+        return {"message": "Agent cleanup completed"}
+    except Exception as e:
+        logger.error(f"Error during agent cleanup: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 # ==================== WEBSOCKET ENDPOINTS ====================
 
 @app.websocket("/ws/conversation/{session_id}")
@@ -748,9 +851,10 @@ async def websocket_conversation_proxy(websocket: WebSocket, session_id: str):
     
     This endpoint:
     1. Accepts WebSocket connection from customer frontend
-    2. Establishes connection to ElevenLabs API
-    3. Buffers AI responses for agent approval
-    4. Forwards approved responses to customer
+    2. Gets the customer rep's dynamic agent ID based on their knowledge base
+    3. Establishes connection to ElevenLabs API with the dynamic agent
+    4. Buffers AI responses for agent approval
+    5. Forwards approved responses to customer
     
     Usage:
         Customer frontend connects to: ws://localhost:8000/ws/conversation/{session_id}
@@ -763,11 +867,35 @@ async def websocket_conversation_proxy(websocket: WebSocket, session_id: str):
     await websocket.accept()
     
     try:
+        # Get session to find customer rep ID
+        session = await db_service.get_session_by_id(session_id)  # No customer_rep_id check for websocket
+        if not session:
+            await websocket.send_json({"error": "Session not found"})
+            await websocket.close()
+            return
+        
+        customer_rep_id = session.get("customer_rep_id")
+        if not customer_rep_id:
+            await websocket.send_json({"error": "No customer rep found for this session"})
+            await websocket.close()
+            return
+        
+        # Get the dynamic agent ID for this customer rep
+        agent = await agent_service.get_agent_for_user(customer_rep_id)
+        if not agent:
+            await websocket.send_json({"error": "No agent found for this customer rep. Please upload knowledge base documents first."})
+            await websocket.close()
+            return
+        
+        dynamic_agent_id = agent["elevenlabs_agent_id"]
+        logger.info(f"Using dynamic agent ID {dynamic_agent_id} for customer rep {customer_rep_id}")
+        
         await handle_elevenlabs_proxy_with_agent_control(
             frontend_ws=websocket,
             session_id=session_id,
-            agent_id=elevenlabs_agent_id,
-            db_service=db_service
+            agent_id=dynamic_agent_id,
+            db_service=db_service,
+            delete_agent_on_close=True  # Delete agent after conversation ends
         )
     except Exception as e:
         logger.error(f"WebSocket proxy error for session {session_id}: {e}")

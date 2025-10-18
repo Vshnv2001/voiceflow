@@ -9,6 +9,8 @@ import asyncio
 import json
 import logging
 import websockets
+import ssl
+import certifi
 from fastapi import WebSocket, WebSocketDisconnect
 
 logger = logging.getLogger(__name__)
@@ -59,8 +61,26 @@ async def handle_elevenlabs_proxy(
         elevenlabs_url = f"wss://api.elevenlabs.io/v1/convai/conversation?agent_id={agent_id}"
         logger.info(f"Connecting to ElevenLabs: {elevenlabs_url}")
         
-        elevenlabs_ws = await websockets.connect(elevenlabs_url)
-        logger.info("✅ Connected to ElevenLabs WebSocket")
+        # Create SSL context with proper certificate verification
+        try:
+            ssl_context = ssl.create_default_context()
+            ssl_context.load_verify_locations(certifi.where())
+            elevenlabs_ws = await websockets.connect(
+                elevenlabs_url,
+                ssl=ssl_context
+            )
+            logger.info("✅ Connected to ElevenLabs WebSocket with SSL verification")
+        except ssl.SSLError as e:
+            logger.warning(f"SSL verification failed: {e}. Trying with insecure SSL...")
+            # Fallback to insecure SSL if certificate verification fails
+            insecure = ssl.create_default_context()
+            insecure.check_hostname = False
+            insecure.verify_mode = ssl.CERT_NONE
+            elevenlabs_ws = await websockets.connect(
+                elevenlabs_url,
+                ssl=insecure
+            )
+            logger.info("✅ Connected to ElevenLabs WebSocket with insecure SSL")
         
         # Create tasks for bidirectional message forwarding
         async def forward_to_elevenlabs():

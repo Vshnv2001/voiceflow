@@ -353,6 +353,9 @@ export default function DashboardPage() {
 
     await refreshDocuments()
     setUploading(false)
+    
+    // Clear the files array after successful upload to reset UI
+    setFiles([])
   }
 
   async function deleteDocument(id: string) {
