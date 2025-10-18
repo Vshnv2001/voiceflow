@@ -6,9 +6,3 @@ frontend/build
 frontend/coverage
 frontend/dist
 frontend/public
-frontend/src
-frontend/styles
-frontend/test
-frontend/types
-frontend/utils
-backend/.venv
