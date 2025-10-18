@@ -13,6 +13,8 @@ import os
 from datetime import datetime
 import uuid
 
+import uvicorn
+
 from services.voice_service import VoiceService
 from services.ai_service import AIService
 from services.database_service import DatabaseService
@@ -23,7 +25,8 @@ from models.schemas import (
     VoiceProcessingJobResponse, AgentApprovalRequest, SystemConfigUpdate,
     VoiceResponse, VoiceSynthesisRequest, VoiceSynthesisResponse,
     KnowledgeDocumentCreate, KnowledgeDocumentResponse, KnowledgeCollectionCreate,
-    KnowledgeCollectionResponse, DocumentUploadResponse, RAGSearchRequest, RAGSearchResponse
+    KnowledgeCollectionResponse, DocumentUploadResponse, RAGSearchRequest, RAGSearchResponse,
+    CustomerServiceCallRequest
 )
 
 # Initialize FastAPI app
@@ -36,7 +39,7 @@ app = FastAPI(
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "https://yourdomain.com"],
+    allow_origins=["http://localhost:3000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -63,21 +66,34 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
 
 # ==================== SESSION ENDPOINTS ====================
 
-@app.post("/api/sessions", response_model=SessionResponse)
-async def create_session(
-    session_data: SessionCreate,
-    current_user: dict = Depends(get_current_user)
+@app.post("/api/customer-service/call", response_model=SessionResponse)
+async def initiate_customer_service_call(
+    call_data: CustomerServiceCallRequest,
 ):
-    """Create a new customer service session"""
+    """Initiate a customer service call"""
     try:
         session = await db_service.create_session(
-            customer_rep_id=current_user["id"],
-            customer_id=session_data.customer_id,
-            metadata=session_data.metadata
+            customer_rep_id=call_data.rep_id,
+            customer_name=call_data.customer_name,
+            metadata=call_data.metadata
         )
         return session
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    
+@app.post("/api/customer-service/call/accept", response_model=SessionResponse)
+async def accept_customer_service_call(
+    session_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Accept a customer service call"""
+    try:
+        session = await db_service.accept_session(session_id, current_user["id"])
+        return session
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+
     
 
 @app.post("/api/sessions/{session_id}/close", response_model=SessionResponse)
@@ -92,6 +108,7 @@ async def close_session(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @app.get("/api/sessions", response_model=List[SessionResponse])
 async def get_sessions(
     status: Optional[str] = None,
@@ -104,6 +121,42 @@ async def get_sessions(
         sessions = await db_service.get_sessions(
             customer_rep_id=current_user["id"],
             status=status,
+            limit=limit,
+            offset=offset
+        )
+        return sessions
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/reps/pending-sessions", response_model=List[SessionResponse])
+async def get_pending_sessions_for_rep(
+    limit: int = 50,
+    offset: int = 0,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get pending call requests for the current customer rep"""
+    try:
+        # Get pending sessions where customer_rep_id matches current user's id
+        sessions = await db_service.get_pending_sessions_for_rep(
+            customer_rep_id=current_user["id"],
+            limit=limit,
+            offset=offset
+        )
+        return sessions
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/reps/active-sessions", response_model=List[SessionResponse])
+async def get_active_sessions_for_rep(
+    limit: int = 50,
+    offset: int = 0,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get active sessions for the current customer rep"""
+    try:
+        # Get active sessions where customer_rep_id matches current user's id
+        sessions = await db_service.get_active_sessions_for_rep(
+            customer_rep_id=current_user["id"],
             limit=limit,
             offset=offset
         )
@@ -672,6 +725,12 @@ async def health_check():
     """Health check endpoint"""
     return {"status": "healthy", "timestamp": datetime.utcnow()}
 
+
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True,
+        log_level="debug"
+    )

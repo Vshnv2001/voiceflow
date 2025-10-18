@@ -13,6 +13,8 @@ import { Label } from "@/components/ui/label"
 import { Progress } from "@/components/ui/progress"
 import { Badge } from "@/components/ui/badge"
 import Navigation from "@/components/Navigation"
+import PendingCalls from "@/components/PendingCalls"
+import { useActiveSessions } from "@/hooks/useActiveSessions"
 
 import {
   Phone,
@@ -176,6 +178,7 @@ export default function DashboardPage() {
 
   // Drag-and-drop visual
   const [isDragging, setIsDragging] = useState(false)
+  const { activeSessions, loading: sessionsLoading } = useActiveSessions()
 
   // ===== Effects =====
   useEffect(() => {
@@ -281,6 +284,17 @@ export default function DashboardPage() {
     setIsDragging(false)
   }
 
+  const getTimeSince = (dateString: string) => {
+    const date = new Date(dateString)
+    const now = new Date()
+    const seconds = Math.floor((now.getTime() - date.getTime()) / 1000)
+    
+    const minutes = Math.floor(seconds / 60)
+    const hours = Math.floor(minutes / 60)
+    
+    if (hours > 0) return `${hours}:${String(minutes % 60).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`
+    return `${minutes}:${String(seconds % 60).padStart(2, '0')}`
+  }
   function removeFile(idx: number) {
     setFiles((prev) => prev.filter((_, i) => i !== idx))
   }
@@ -423,11 +437,13 @@ export default function DashboardPage() {
               <TrendingUp className="h-4 w-4 text-muted-foreground" />
             </CardHeader>
             <CardContent>
-              <div className="text-2xl font-bold">{ongoingCalls.length}</div>
+              <div className="text-2xl font-bold">
+                {sessionsLoading ? '...' : activeSessions.length}
+              </div>
               <p className="text-xs text-muted-foreground">Active conversations right now</p>
               <div className="mt-3 flex gap-2">
-                {ongoingCalls.map((call) => (
-                  <div key={call.id} className="h-2 w-2 animate-pulse rounded-full bg-green-500" />
+                {activeSessions.slice(0, 5).map((session) => (
+                  <div key={session.id} className="h-2 w-2 animate-pulse rounded-full bg-green-500" />
                 ))}
               </div>
             </CardContent>
@@ -449,6 +465,11 @@ export default function DashboardPage() {
               <Progress value={85} className="mt-3" />
             </CardContent>
           </Card>
+        </div>
+
+        {/* Pending Call Requests */}
+        <div className="mb-8">
+          <PendingCalls />
         </div>
 
         {/* ===== 2-col layout ===== */}
@@ -669,11 +690,48 @@ export default function DashboardPage() {
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
                 <Users className="h-5 w-5" />
-                Ongoing Calls
+                Ongoing Calls ({activeSessions.length})
               </CardTitle>
               <CardDescription>Real-time monitoring of active conversations</CardDescription>
             </CardHeader>
             <CardContent>
+              {sessionsLoading ? (
+                <div className="text-center py-8">
+                  <div className="h-8 w-8 animate-spin rounded-full border-4 border-primary border-t-transparent mx-auto mb-4"></div>
+                  <p className="text-muted-foreground">Loading sessions...</p>
+                </div>
+              ) : activeSessions.length === 0 ? (
+                <div className="text-center py-8">
+                  <Phone className="h-12 w-12 text-muted-foreground mx-auto mb-4 opacity-50" />
+                  <p className="text-muted-foreground">No active calls at the moment</p>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {activeSessions.map((session) => (
+                    <div
+                      key={session.id}
+                      className="flex cursor-pointer items-center justify-between rounded-lg border border-border p-4 transition-colors hover:bg-accent"
+                      onClick={() => router.push(`/session/${session.id}`)}
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className="flex h-10 w-10 items-center justify-center rounded-full bg-primary/10">
+                          <Phone className="h-5 w-5 text-primary" />
+                        </div>
+                        <div>
+                          <p className="font-medium">{session.customer_name || 'Anonymous'}</p>
+                          <p className="text-xs text-muted-foreground">Duration: {getTimeSince(session.created_at)}</p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <Badge variant="default" className="bg-green-500">
+                          Active
+                        </Badge>
+                        <div className="h-2 w-2 animate-pulse rounded-full bg-green-500" />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
               <div className="space-y-4">
                 {ongoingCalls.map((call) => (
                   <div
