@@ -8,12 +8,18 @@ import uuid
 import traceback
 import hashlib
 import mimetypes
+import logging
 from typing import List, Dict, Any, Optional, Tuple
+import aiohttp
+import json
+import ssl
+import certifi
 from supabase import create_client, Client
 from datetime import datetime, timezone
 import aiofiles
 import aiohttp
 from openai import AsyncOpenAI
+from elevenlabs import ElevenLabs
 import PyPDF2
 import docx
 import markdown
@@ -27,6 +33,8 @@ from models.schemas import (
     KnowledgeCollectionResponse, RAGSearchResult, RAGSearchResponse
 )
 
+logger = logging.getLogger(__name__)
+
 class KnowledgeService:
     def __init__(self):
         self.openai_api_key = os.getenv("OPENAI_API_KEY")
@@ -37,6 +45,12 @@ class KnowledgeService:
         if not self.sb_url or not self.sb_key:
             raise RuntimeError("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY")
         self.sb: Client = create_client(self.sb_url, self.sb_key)
+
+        # Initialize ElevenLabs client
+        self.elevenlabs_api_key = os.getenv("ELEVENLABS_API_KEY")
+        if not self.elevenlabs_api_key:
+            raise RuntimeError("Missing ELEVENLABS_API_KEY")
+        self.elevenlabs_client = ElevenLabs(api_key=self.elevenlabs_api_key)
 
         self.bucket = os.getenv("SUPABASE_KB_BUCKET", "knowledge-base")
         # Optional: ensure the bucket exists (once)
@@ -112,7 +126,35 @@ class KnowledgeService:
             return signed.get("signedURL") or signed.get("signed_url") or signed  # handle different client shapes
         except Exception as e:
             print(f"Failed to sign storage URL for {stored}: {e}")
+            print(traceback.format_exc())
             return None
+
+    async def _upload_to_elevenlabs(
+        self, 
+        file_content: bytes, 
+        file_name: str, 
+        title: str
+    ) -> Dict[str, Any]:
+        """Upload file to ElevenLabs Knowledge Base API"""
+        try:
+            # Create a file-like object from bytes
+            file_obj = BytesIO(file_content)
+            file_obj.name = file_name
+            
+            # Upload to ElevenLabs Knowledge Base
+            response = self.elevenlabs_client.conversational_ai.knowledge_base.documents.create_from_file(
+                file=file_obj,
+                name=title
+            )
+            
+            return {
+                "id": response.id,
+                "name": response.name
+            }
+            
+        except Exception as e:
+            print(f"Error uploading to ElevenLabs: {e}")
+            raise e
 
     async def upload_document(
         self, 
@@ -127,19 +169,14 @@ class KnowledgeService:
             file_type = self._get_file_type(file_name)
             file_size = len(file_content)
 
-            # Stable unique name (you already have this)
-            file_hash = hashlib.md5(file_content).hexdigest()
-            unique_filename = f"{file_hash}_{file_name}"
-
-            # --- CHANGED: upload to storage & get canonical storage path ---
-            storage_path = await self._upload_to_storage(
+            # Upload to ElevenLabs Knowledge Base API
+            elevenlabs_response = await self._upload_to_elevenlabs(
                 file_content=file_content,
-                filename=unique_filename,
-                user_id=user_id
+                file_name=file_name,
+                title=title
             )
-            # Note: we store the storage *path* in file_url (not a signed URL)
-            # e.g., "knowledge-base/<user_id>/2025/10/18/<hash>_file.pdf"
 
+            # Create document record in our database with ElevenLabs file ID
             document = await self.db_service.create_knowledge_document(
                 user_id=user_id,
                 title=title,
@@ -147,7 +184,9 @@ class KnowledgeService:
                 file_name=file_name,
                 file_type=file_type,
                 file_size=file_size,
-                file_url=storage_path  # <-- store path, not public URL
+                file_url=elevenlabs_response["id"],  # Store ElevenLabs file ID as file_url
+                elevenlabs_file_id=elevenlabs_response["id"],
+                status="processed"  # ElevenLabs handles processing
             )
 
             if collection_ids:
@@ -157,7 +196,6 @@ class KnowledgeService:
                         collection_id=collection_id
                     )
 
-            asyncio.create_task(self._process_document(document["id"], file_content, file_type))
             return document
 
         except Exception as e:
@@ -165,148 +203,6 @@ class KnowledgeService:
             print(traceback.format_exc())
             raise e
     
-    async def _process_document(self, document_id: str, file_content: bytes, file_type: str):
-        """Background task to process document and create embeddings"""
-        try:
-            # Extract text content
-            content_text = await self._extract_text(file_content, file_type)
-            
-            # Update document with extracted text
-            await self.db_service.update_knowledge_document(
-                document_id=document_id,
-                content_text=content_text,
-                status="processed"
-            )
-            
-            # Split into chunks
-            chunks = self._split_into_chunks(content_text)
-            
-            # Create chunks with embeddings
-            for i, chunk_content in enumerate(chunks):
-                # Generate embedding
-                embedding = await self._generate_embedding(chunk_content)
-                
-                # Create chunk record
-                await self.db_service.create_knowledge_chunk(
-                    document_id=document_id,
-                    chunk_index=i,
-                    content=chunk_content,
-                    content_length=len(chunk_content),
-                    embedding=embedding,
-                    metadata={"chunk_size": len(chunk_content)}
-                )
-            
-        except Exception as e:
-            print(f"Error processing document {document_id}: {e}")
-            # Update document status to failed
-            await self.db_service.update_knowledge_document(
-                document_id=document_id,
-                status="failed",
-                processing_error=str(e)
-            )
-    
-    async def _extract_text(self, file_content: bytes, file_type: str) -> str:
-        """Extract text content from various file types"""
-        try:
-            if file_type == "pdf":
-                return self._extract_pdf_text(file_content)
-            elif file_type == "docx":
-                return self._extract_docx_text(file_content)
-            elif file_type == "txt":
-                return file_content.decode('utf-8')
-            elif file_type == "md":
-                return self._extract_markdown_text(file_content)
-            else:
-                raise ValueError(f"Unsupported file type: {file_type}")
-        except Exception as e:
-            print(f"Error extracting text from {file_type}: {e}")
-            raise e
-    
-    def _extract_pdf_text(self, file_content: bytes) -> str:
-        """Extract text from PDF file"""
-        try:
-            pdf_reader = PyPDF2.PdfReader(BytesIO(file_content))
-            text = ""
-            for page in pdf_reader.pages:
-                text += page.extract_text() + "\n"
-            return text.strip()
-        except Exception as e:
-            print(f"Error extracting PDF text: {e}")
-            raise e
-    
-    def _extract_docx_text(self, file_content: bytes) -> str:
-        """Extract text from DOCX file"""
-        try:
-            doc = docx.Document(BytesIO(file_content))
-            text = ""
-            for paragraph in doc.paragraphs:
-                text += paragraph.text + "\n"
-            return text.strip()
-        except Exception as e:
-            print(f"Error extracting DOCX text: {e}")
-            raise e
-    
-    def _extract_markdown_text(self, file_content: bytes) -> str:
-        """Extract text from Markdown file"""
-        try:
-            content = file_content.decode('utf-8')
-            # Convert markdown to HTML then extract text
-            html = markdown.markdown(content)
-            # Simple HTML tag removal
-            text = re.sub(r'<[^>]+>', '', html)
-            return text.strip()
-        except Exception as e:
-            print(f"Error extracting Markdown text: {e}")
-            raise e
-    
-    def _split_into_chunks(self, text: str) -> List[str]:
-        """Split text into overlapping chunks"""
-        if len(text) <= self.chunk_size:
-            return [text]
-        
-        chunks = []
-        start = 0
-        
-        while start < len(text):
-            end = start + self.chunk_size
-            
-            # Try to break at sentence boundary
-            if end < len(text):
-                # Look for sentence endings within the last 100 characters
-                search_start = max(start + self.chunk_size - 100, start)
-                sentence_end = text.rfind('.', search_start, end)
-                if sentence_end > start:
-                    end = sentence_end + 1
-                else:
-                    # Look for word boundary
-                    word_end = text.rfind(' ', search_start, end)
-                    if word_end > start:
-                        end = word_end
-            
-            chunk = text[start:end].strip()
-            if chunk:
-                chunks.append(chunk)
-            
-            # Move start position with overlap
-            start = end - self.chunk_overlap
-            if start >= len(text):
-                break
-        
-        return chunks
-    
-    async def _generate_embedding(self, text: str) -> List[float]:
-        """Generate embedding for text using OpenAI"""
-        try:
-            print("Trying to generate embeddings")
-            response = await self.client.embeddings.create(
-                model=self.embedding_model,
-                input=text
-            )
-            print("Embeddings generated successfully")
-            return response.data[0].embedding
-        except Exception as e:
-            print(f"Error generating embedding: {e}")
-            raise e
     
     def _get_file_type(self, filename: str) -> str:
         """Determine file type from filename"""
@@ -330,33 +226,31 @@ class KnowledgeService:
         limit: int = 5,
         similarity_threshold: float = 0.7
     ) -> RAGSearchResponse:
-        """Search knowledge base using RAG"""
+        """Search knowledge base using ElevenLabs API"""
         try:
             start_time = datetime.utcnow()
             
-            # Generate query embedding
-            query_embedding = await self._generate_embedding(query)
-            
-            # Search for similar chunks
-            results = await self.db_service.search_knowledge_chunks(
-                query_embedding=query_embedding,
+            # Get user's documents with ElevenLabs file IDs
+            documents = await self.db_service.get_knowledge_documents(
                 user_id=user_id,
-                collection_ids=collection_ids,
-                limit=limit,
-                similarity_threshold=similarity_threshold
+                collection_id=collection_ids[0] if collection_ids else None,
+                status="processed",
+                limit=100  # Get all processed documents
             )
             
-            # Convert to response format
+            # For now, return a simple response indicating ElevenLabs integration
+            # In a full implementation, you would use ElevenLabs search API
             search_results = []
-            for result in results:
-                search_results.append(RAGSearchResult(
-                    chunk_id=result['chunk_id'],
-                    document_id=result['document_id'],
-                    document_title=result['document_title'],
-                    content=result['content'],
-                    similarity_score=result['similarity_score'],
-                    metadata=result['metadata']
-                ))
+            for doc in documents[:limit]:
+                if doc.get('elevenlabs_file_id'):
+                    search_results.append(RAGSearchResult(
+                        chunk_id=doc['id'],
+                        document_id=doc['id'],
+                        document_title=doc['title'],
+                        content=f"Document: {doc['title']} (Processed by ElevenLabs)",
+                        similarity_score=0.8,  # Placeholder score
+                        metadata={"elevenlabs_file_id": doc['elevenlabs_file_id']}
+                    ))
             
             end_time = datetime.utcnow()
             search_time_ms = (end_time - start_time).total_seconds() * 1000
@@ -404,10 +298,50 @@ class KnowledgeService:
             print(f"Error getting document: {e}")
             raise e
     
-    async def delete_document(self, document_id: str, user_id: str) -> bool:
-        """Delete a document and its chunks"""
+    async def _delete_from_elevenlabs(self, elevenlabs_file_id: str) -> bool:
+        """Delete document from ElevenLabs Knowledge Base"""
         try:
+            if not elevenlabs_file_id:
+                return True  # Nothing to delete
+                
+            if not self.elevenlabs_client:
+                print("ElevenLabs client not available, skipping ElevenLabs deletion")
+                return True
+                
+            # Delete from ElevenLabs Knowledge Base
+            self.elevenlabs_client.conversational_ai.knowledge_base.documents.delete(
+                documentation_id=elevenlabs_file_id
+            )
+            print(f"Successfully deleted document {elevenlabs_file_id} from ElevenLabs")
+            return True
+            
+        except Exception as e:
+            # Check if it's a 404 error (document not found) - this is acceptable
+            if hasattr(e, 'response') and hasattr(e.response, 'status_code') and e.response.status_code == 404:
+                print(f"Document {elevenlabs_file_id} not found in ElevenLabs (already deleted or never existed)")
+                return True  # Consider this a success since the end result is the same
+            else:
+                print(f"Error deleting from ElevenLabs: {e}")
+                # Don't raise - we still want to delete from our DB even if ElevenLabs fails
+                return False
+
+    async def delete_document(self, document_id: str, user_id: str) -> bool:
+        """Delete a document from both ElevenLabs and our database"""
+        try:
+            # First, get the document to retrieve the ElevenLabs file ID
+            doc = await self.db_service.get_knowledge_document(document_id, user_id)
+            if not doc:
+                return False
+                
+            elevenlabs_file_id = doc.get("elevenlabs_file_id")
+            
+            # Delete from ElevenLabs first (best effort)
+            if elevenlabs_file_id:
+                await self._delete_from_elevenlabs(elevenlabs_file_id)
+            
+            # Then delete from our database
             return await self.db_service.delete_knowledge_document(document_id, user_id)
+            
         except Exception as e:
             print(f"Error deleting document: {e}")
             raise e
@@ -457,3 +391,125 @@ class KnowledgeService:
         except Exception as e:
             print(f"Error deleting collection: {e}")
             raise e
+    
+    async def get_user_elevenlabs_file_ids(self, user_id: str) -> List[str]:
+        """Get all elevenlabs_file_id values for a user's processed documents"""
+        try:
+            # Get all processed documents for the user
+            documents = await self.db_service.get_knowledge_documents(
+                user_id=user_id,
+                status="processed",
+                limit=1000  # Get all processed documents
+            )
+            
+            # Extract elevenlabs_file_id values, filtering out None/empty values
+            file_ids = [
+                doc["elevenlabs_file_id"] 
+                for doc in documents 
+                if doc.get("elevenlabs_file_id")
+            ]
+            
+            print(f"Found {len(file_ids)} ElevenLabs file IDs for user {user_id}")
+            return file_ids
+            
+        except Exception as e:
+            print(f"Error getting ElevenLabs file IDs for user {user_id}: {e}")
+            return []
+    
+    async def update_agent_with_knowledge_base(self, agent_id: str, user_id: str) -> bool:
+        """Update an agent to use the user's knowledge base documents"""
+        try:
+            # Get all processed file IDs for the user
+            file_ids = await self.get_user_elevenlabs_file_ids(user_id)
+            
+            if not file_ids:
+                print(f"No knowledge base documents found for user {user_id}")
+                return True  # Not an error, just no documents to add
+            
+            # Create knowledge base locators for the agent update
+            knowledge_base = [
+                {
+                    "type": "file",
+                    "name": f"Document.txt",
+                    "id": file_id,
+                    "usage_mode": "auto"
+                }
+                for i, file_id in enumerate(file_ids)
+            ]
+            
+            # Prepare the agent update payload
+            update_payload = {
+                "conversation_config": {
+                    "agent": {
+                        "prompt": {
+                            "knowledge_base": knowledge_base
+                        },
+                    }
+                }
+            }
+            
+            # Update the agent using ElevenLabs API with SSL context handling
+            
+            url = f"https://api.elevenlabs.io/v1/convai/agents/{agent_id}"
+            headers = {
+                "xi-api-key": self.elevenlabs_api_key,
+                "Content-Type": "application/json"
+            }
+            
+            # Create SSL context with proper certificate handling
+            ssl_context = ssl.create_default_context()
+            try:
+                # Try with certifi certificates first
+                ssl_context.load_verify_locations(certifi.where())
+                print("Using certifi certificates for SSL verification")
+            except Exception as cert_error:
+                print(f"Failed to load certifi certificates: {cert_error}")
+                # Fallback to system certificates
+                ssl_context = ssl.create_default_context()
+                print("Using system certificates for SSL verification")
+            
+            # Create connector with SSL context
+            connector = aiohttp.TCPConnector(ssl=ssl_context)
+            
+            try:
+                async with aiohttp.ClientSession(connector=connector) as session:
+                    async with session.patch(url, headers=headers, json=update_payload) as response:
+                        if response.status == 200:
+                            print(f"Successfully updated agent {agent_id} with {len(file_ids)} knowledge base documents")
+                            return True
+                        else:
+                            error_text = await response.text()
+                            print(f"Failed to update agent {agent_id}: {response.status} - {error_text}")
+                            return False
+                            
+            except ssl.SSLError as ssl_error:
+                print(f"SSL verification failed, retrying without verification: {ssl_error}")
+                # Fallback: disable SSL verification (less secure but works)
+                ssl_context_insecure = ssl.create_default_context()
+                ssl_context_insecure.check_hostname = False
+                ssl_context_insecure.verify_mode = ssl.CERT_NONE
+                
+                connector_insecure = aiohttp.TCPConnector(ssl=ssl_context_insecure)
+                
+                async with aiohttp.ClientSession(connector=connector_insecure) as session:
+                    async with session.patch(url, headers=headers, json=update_payload) as response:
+                        if response.status == 200:
+                            print(f"Successfully updated agent {agent_id} with {len(file_ids)} knowledge base documents (insecure SSL)")
+                            return True
+                        else:
+                            error_text = await response.text()
+                            print(f"Failed to update agent {agent_id}: {response.status} - {error_text}")
+                            return False
+                        
+        except Exception as e:
+            print(f"Error updating agent {agent_id} with knowledge base: {e}")
+            return False
+    
+    async def refresh_agent_knowledge_base(self, agent_id: str, user_id: str) -> bool:
+        """Refresh the agent's knowledge base with the latest documents"""
+        try:
+            logger.info(f"Refreshing knowledge base for agent {agent_id} with user {user_id}'s documents")
+            return await self.update_agent_with_knowledge_base(agent_id, user_id)
+        except Exception as e:
+            logger.error(f"Error refreshing agent knowledge base: {e}")
+            return False

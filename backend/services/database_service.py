@@ -554,7 +554,9 @@ class DatabaseService:
         file_name: str,
         file_type: str,
         file_size: int,
-        file_url: str
+        file_url: str,
+        elevenlabs_file_id: Optional[str] = None,
+        status: str = "processing"
     ) -> Dict[str, Any]:
         """Create a knowledge document"""
         try:
@@ -566,7 +568,8 @@ class DatabaseService:
                 "file_type": file_type,
                 "file_size": file_size,
                 "file_url": file_url,
-                "status": "processing"
+                "elevenlabs_file_id": elevenlabs_file_id,
+                "status": status
             }
             
             result = self.supabase.table("knowledge_documents").insert(data).execute()
@@ -658,11 +661,11 @@ class DatabaseService:
     async def delete_knowledge_document(self, document_id: str, user_id: str) -> bool:
         """Delete a knowledge document + its storage object."""
         try:
-            # 1) Fetch the row to learn the storage path before deletion
+            # 1) Fetch the row to learn the storage path and ElevenLabs file ID before deletion
             doc_res = (
                 self.supabase
                 .table("knowledge_documents")
-                .select("id, file_url")
+                .select("id, file_url, elevenlabs_file_id")
                 .eq("id", document_id)
                 .eq("user_id", user_id)
                 .single()
@@ -679,10 +682,9 @@ class DatabaseService:
                 .delete()
                 .eq("id", document_id)
                 .eq("user_id", user_id)
-                .select("id")                  # <— THIS forces return=representation
                 .execute()
             )
-            deleted = bool(del_res.data)       # now this is trustworthy
+            deleted = len(del_res.data) > 0    # check if any rows were deleted
 
             # 3) Best-effort removal from Storage (after DB delete)
             if deleted and doc.get("file_url"):

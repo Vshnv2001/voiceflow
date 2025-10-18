@@ -17,6 +17,9 @@ import logging
 import io
 import websockets
 
+import numpy as np
+from dotenv import load_dotenv
+load_dotenv()
 import uvicorn
 
 # Configure logging
@@ -71,6 +74,11 @@ elevenlabs_agent_id = os.getenv("ELEVENLABS_AGENT_ID", "agent_4901k7vt2tdffjw9qr
 if not elevenlabs_api_key:
     logger.warning("ELEVENLABS_API_KEY not set - ElevenLabs features will not work")
 
+# Get ElevenLabs agent ID from environment
+elevenlabs_agent_id = os.getenv("ELEVENLABS_AGENT_ID")
+if not elevenlabs_agent_id:
+    raise ValueError("ELEVENLABS_AGENT_ID environment variable is required")
+
 # Dependency to get current user
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
     """Extract and validate user from JWT token"""
@@ -94,6 +102,19 @@ async def initiate_customer_service_call(
             customer_name=call_data.customer_name,
             metadata=call_data.metadata
         )
+        
+        # Update agent with knowledge base for the customer rep
+        if call_data.rep_id:
+            print(f"🔄 Updating agent with knowledge base for rep {call_data.rep_id}")
+            knowledge_updated = await knowledge_service.update_agent_with_knowledge_base(
+                agent_id=os.getenv("ELEVENLABS_AGENT_ID"),  # Assuming rep_id is the agent_id
+                user_id=call_data.rep_id
+            )
+            if knowledge_updated:
+                print(f"✅ Knowledge base updated for rep {call_data.rep_id}")
+            else:
+                print(f"⚠️ Failed to update knowledge base for rep {call_data.rep_id}")
+        
         print(f"✅ Session created successfully! ID: {session.get('id')}")
         print(f"Session data being returned: {session}")
         return session
@@ -482,6 +503,7 @@ async def upload_document(
     title: str = Form(...),
     description: Optional[str] = Form(None),
     collection_ids: Optional[str] = Form(None),  # JSON string of collection IDs
+    agent_id: Optional[str] = Form(None),  # Optional agent ID to refresh after upload
     current_user: dict = Depends(get_current_user)
 ):
     """Upload a document to the knowledge base"""
@@ -513,6 +535,14 @@ async def upload_document(
             description=description,
             collection_ids=collection_id_list
         )
+        
+        # If agent_id is provided, refresh the agent's knowledge base in the background
+        if agent_id:
+            background_tasks.add_task(
+                knowledge_service.refresh_agent_knowledge_base,
+                agent_id,
+                current_user["id"]
+            )
         
         return DocumentUploadResponse(
             document_id=document['id'],
@@ -851,6 +881,39 @@ async def send_agent_response(session_id: str, request: dict = Body(...)):
     """
     try:
         approved_text = request.get('text', '')
+        await elevenlabs_ws_service.close_connection(connection_id)
+        return {"message": "Connection closed successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ==================== KNOWLEDGE BASE MANAGEMENT ====================
+
+@app.post("/api/knowledge-base/refresh-agent/{agent_id}")
+async def refresh_agent_knowledge_base(
+    agent_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Refresh an agent's knowledge base with the latest documents"""
+    try:
+        success = await knowledge_service.refresh_agent_knowledge_base(agent_id, current_user["id"])
+        if success:
+            return {"message": "Agent knowledge base refreshed successfully"}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to refresh agent knowledge base")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ==================== WEBSOCKET AUDIO STREAMING ====================
+
+class AudioBuffer:
+    """Buffer to accumulate audio chunks and detect silence"""
+    def __init__(self, silence_threshold: float = 0.01, silence_duration: float = 2.0, sample_rate: int = 16000):
+        self.buffer = []
+        self.silence_threshold = silence_threshold
+        self.silence_duration = silence_duration
+        self.sample_rate = sample_rate
+        self.silence_samples = int(silence_duration * sample_rate)
+        self.current_silence_count = 0
         
         if not approved_text:
             raise HTTPException(status_code=400, detail="Text is required")

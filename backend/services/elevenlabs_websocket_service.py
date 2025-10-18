@@ -13,6 +13,7 @@ import ssl
 import certifi
 
 from starlette.websockets import WebSocket as StarletteWebSocket, WebSocketDisconnect
+from services.knowledge_service import KnowledgeService
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,8 @@ class ElevenLabsWebSocketService:
         self.elevenlabs_connections: Dict[str, websockets.WebSocketClientProtocol] = {}
         self.connection_metadata: Dict[str, Dict[str, Any]] = {}
         self._ssl_context: Optional[ssl.SSLContext] = None
+        # Initialize knowledge service for loading user's knowledge base
+        self.knowledge_service = KnowledgeService()
 
     def _create_ssl_context(self) -> ssl.SSLContext:
         if self._ssl_context is None:
@@ -65,6 +68,14 @@ class ElevenLabsWebSocketService:
         }
 
         try:
+            # Load user's knowledge base into the agent before connecting
+            logger.info(f"Loading knowledge base for user {user_id} into agent {agent_id}")
+            knowledge_loaded = await self.knowledge_service.update_agent_with_knowledge_base(agent_id, user_id)
+            if knowledge_loaded:
+                logger.info(f"Successfully loaded knowledge base for user {user_id}")
+            else:
+                logger.warning(f"Failed to load knowledge base for user {user_id}, continuing without it")
+            
             ssl_context = self._create_ssl_context()
             elevenlabs_url = f"{self.base_url}?agent_id={agent_id}"
 
