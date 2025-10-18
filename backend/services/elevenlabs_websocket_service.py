@@ -40,6 +40,12 @@ class ElevenLabsWebSocketService:
         self._heartbeat_tasks: Dict[str, asyncio.Task] = {}
         self._reconnect_tasks: Dict[str, asyncio.Task] = {}
         
+    async def wait_until_ready(self, connection_id: str, timeout: float = 10.0):
+        evt = self._ready.get(connection_id)
+        if evt is None:
+            raise ValueError(f"No ready event for {connection_id}")
+        await asyncio.wait_for(evt.wait(), timeout=timeout)
+
     def _create_ssl_context(self) -> ssl.SSLContext:
         if self._ssl_context is None:
             try:
@@ -159,7 +165,8 @@ class ElevenLabsWebSocketService:
         agent_id: str,
         session_id: str,
         user_id: str,
-        metadata: Optional[Dict[str, Any]] = None
+        metadata: Optional[Dict[str, Any]] = None,
+        enable_client_forwarding: bool = True,
     ) -> str:
         """Create a new WebSocket connection to ElevenLabs"""
         connection_id = str(uuid.uuid4())
@@ -171,6 +178,7 @@ class ElevenLabsWebSocketService:
             "user_id": user_id,
             "metadata": metadata or {},
             "created_at": datetime.utcnow(),
+            "enable_client_forwarding": enable_client_forwarding,
             "status": "connecting",
         }
 
@@ -232,44 +240,21 @@ class ElevenLabsWebSocketService:
                 raise
 
     async def _forward_messages(self, connection_id: str):
-        """Forward messages between client and ElevenLabs with robust error handling"""
-        try:
-            client_ws = self.active_connections.get(connection_id)
-            elevenlabs_ws = self.elevenlabs_connections.get(connection_id)
-            if not client_ws or not elevenlabs_ws:
-                logger.warning(f"Missing connections for {connection_id}")
-                return
+        client_ws = self.active_connections.get(connection_id)
+        elevenlabs_ws = self.elevenlabs_connections.get(connection_id)
+        if not client_ws or not elevenlabs_ws:
+            return
 
-            client_to_elevenlabs = asyncio.create_task(self._forward_client_to_elevenlabs(connection_id))
-            elevenlabs_to_client = asyncio.create_task(self._forward_elevenlabs_to_client(connection_id))
+        tasks = [asyncio.create_task(self._forward_elevenlabs_to_client(connection_id))]
+        if self.connection_metadata.get(connection_id, {}).get("enable_client_forwarding", True):
+            tasks.append(asyncio.create_task(self._forward_client_to_elevenlabs(connection_id)))
 
-            done, pending = await asyncio.wait(
-                [client_to_elevenlabs, elevenlabs_to_client],
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            
-            # Cancel remaining tasks
-            for task in pending:
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-                    
-            # Check if any task failed with an exception
-            for task in done:
-                try:
-                    await task
-                except Exception as e:
-                    logger.error(f"Message forwarding task failed for {connection_id}: {e}")
-                    # Trigger reconnection instead of closing
-                    await self._trigger_reconnection(connection_id)
-                    return
-                    
-        except Exception as e:
-            logger.error(f"Error in message forwarding for connection {connection_id}: {e}")
-            # Try to reconnect instead of immediately closing
-            await self._trigger_reconnection(connection_id)
+        # Do not cancel the other task when one fails; let each run independently.
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for r in results:
+            if isinstance(r, Exception):
+                logger.error(f"Forwarding task error on {connection_id}: {r}")
+
 
     async def _forward_client_to_elevenlabs(self, connection_id: str):
         """Forward messages from your app client (Starlette WS) to ElevenLabs"""
@@ -313,8 +298,7 @@ class ElevenLabsWebSocketService:
                     if not isinstance(b64, str):
                         continue
                     await elevenlabs_ws.send(json.dumps({
-                        "type": "user_audio_chunk",
-                        "audio_base_64": b64
+                        "user_audio_chunk": b64
                     }))
 
                 elif t == "user_message":
@@ -379,6 +363,13 @@ class ElevenLabsWebSocketService:
                     continue
 
                 etype = (event.get("type") or "").lower()
+                
+                if etype in ("agent_response", "audio_response"):
+                    # if the event has an 'is_final' or some end marker, check it here
+                    if event.get("is_final") or event.get("event") == "response_end":
+                        # you can keep an _idle map similar to _ready if you want strict waits
+                        pass
+
                 if etype == "conversation_initiation_metadata":
                     evt = self._ready.get(connection_id)
                     if evt and not evt.is_set():
@@ -414,8 +405,7 @@ class ElevenLabsWebSocketService:
             raise ValueError(f"Connection {connection_id} not found")
         b64 = base64.b64encode(audio_data).decode("ascii")
         payload = {
-            "type": "user_audio_chunk",
-            "audio_base_64": b64
+            "user_audio_chunk": b64
         }
         await self.elevenlabs_connections[connection_id].send(json.dumps(payload))
 

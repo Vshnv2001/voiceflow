@@ -778,41 +778,7 @@ async def websocket_endpoint(
             "features": ["reconnection", "heartbeat", "persistence"]
         })
         
-        # Keep connection alive and handle client messages
-        try:
-            while True:
-                try:
-                    # Wait for messages from client with timeout
-                    message = await asyncio.wait_for(
-                        websocket.receive_text(), 
-                        timeout=60.0  # 1 minute timeout
-                    )
-                    
-                    # Handle ping/pong for connection health
-                    try:
-                        data = json.loads(message)
-                        if data.get("type") == "pong":
-                            # Client responded to heartbeat
-                            continue
-                    except json.JSONDecodeError:
-                        pass
-                        
-                except asyncio.TimeoutError:
-                    # Send heartbeat to client
-                    try:
-                        await websocket.send_json({
-                            "type": "ping",
-                            "timestamp": time.time()
-                        })
-                    except Exception:
-                        break  # Connection lost
-                        
-                except WebSocketDisconnect:
-                    logger.info(f"Client disconnected for session: {session_id}")
-                    break
-                    
-        except Exception as e:
-            logger.error(f"WebSocket message handling error: {e}")
+        await asyncio.Event().wait()
                 
     except Exception as e:
         logger.error(f"WebSocket connection error: {e}")
@@ -876,52 +842,67 @@ async def close_websocket_connection(
 
 class AudioBuffer:
     """Buffer to accumulate audio chunks and detect silence"""
-    def __init__(self, silence_threshold: float = 0.01, silence_duration: float = 2.0, sample_rate: int = 16000):
+    def __init__(
+        self,
+        silence_threshold: float = 0.01,
+        silence_duration: float = 2.0,
+        sample_rate: int = 16000,
+        min_voice_ms: int = 300
+    ):
         self.buffer = []
         self.silence_threshold = silence_threshold
         self.silence_duration = silence_duration
         self.sample_rate = sample_rate
         self.silence_samples = int(silence_duration * sample_rate)
         self.current_silence_count = 0
-        
+
+        # New: track voice presence
+        self.voice_samples_min = int((min_voice_ms / 1000.0) * sample_rate)
+        self.voice_sample_count = 0
+        self.speech_started = False
+
     def add_chunk(self, audio_data: bytes) -> bool:
         """
         Add audio chunk to buffer and check for silence.
         Returns True if silence detected for specified duration.
         """
         self.buffer.append(audio_data)
-        
-        # Convert bytes to numpy array for amplitude analysis
         try:
             audio_array = np.frombuffer(audio_data, dtype=np.int16)
-            # Normalize to -1.0 to 1.0
+            if audio_array.size == 0:
+                return False
+
             audio_normalized = audio_array.astype(np.float32) / 32768.0
-            
-            # Calculate RMS (Root Mean Square) for volume level
-            rms = np.sqrt(np.mean(audio_normalized ** 2))
-            
-            # Check if this chunk is silent
+            rms = float(np.sqrt(np.mean(audio_normalized ** 2)))
+
             if rms < self.silence_threshold:
                 self.current_silence_count += len(audio_array)
             else:
-                # Reset silence counter if sound detected
+                # We heard voice
+                self.speech_started = True
+                self.voice_sample_count += len(audio_array)
                 self.current_silence_count = 0
-            
-            # Return True if we've had enough silence
+
             return self.current_silence_count >= self.silence_samples
-            
+
         except Exception as e:
             print(f"Error processing audio chunk: {e}")
             return False
-    
+
+    def ready_to_send(self) -> bool:
+        """True if we've heard enough voice since last reset to justify an utterance."""
+        return self.speech_started and self.voice_sample_count >= self.voice_samples_min
+
     def get_audio(self) -> bytes:
-        """Get all buffered audio as bytes"""
-        return b''.join(self.buffer)
-    
+        return b"".join(self.buffer)
+
     def clear(self):
-        """Clear the buffer"""
         self.buffer = []
         self.current_silence_count = 0
+        # Also reset voice tracking
+        self.voice_sample_count = 0
+        self.speech_started = False
+
 
 
 @app.websocket("/ws/audio/{session_id}")
@@ -969,82 +950,37 @@ async def websocket_audio_endpoint(websocket: WebSocket, session_id: str):
         return
     
     audio_buffer = AudioBuffer(
-        silence_threshold=0.01,  # Adjust based on your needs
-        silence_duration=2.0,     # 2 seconds of silence
-        sample_rate=16000         # 16kHz sample rate
+        silence_threshold=0.01,
+        silence_duration=2.0,
+        sample_rate=16000,
+        min_voice_ms=300,     # e.g., require at least 300ms of speech
     )
-    
+
     elevenlabs_connection_id = None
-    
+    awaiting_tts = False     # New: prevent overlapping sends
+    last_rx = time.monotonic()
+
     try:
-        # Create ElevenLabs connection
         elevenlabs_connection_id = await elevenlabs_ws_service.create_connection(
             websocket=websocket,
             agent_id=agent_id,
             session_id=session_id,
-            user_id=session.get("customer_rep_id", "customer")
+            user_id=session.get("customer_rep_id", "customer"),
+            enable_client_forwarding=False,
         )
-        
-        print(f"Created ElevenLabs connection: {elevenlabs_connection_id}")
-        
-        await websocket.send_json({
-            "status": "connected",
-            "message": "Connected to ElevenLabs agent",
-            "connection_id": elevenlabs_connection_id
-        })
-        
+        await elevenlabs_ws_service.wait_until_ready(elevenlabs_connection_id)
+        await websocket.send_json({"status":"ready","message":"ElevenLabs ready"})
+
         while True:
-            # Receive audio data from client
             data = await websocket.receive()
-            
             if "bytes" in data:
                 audio_chunk = data["bytes"]
-                
-                # Add chunk to buffer and check for silence
-                silence_detected = audio_buffer.add_chunk(audio_chunk)
-                
-                if silence_detected:
-                    print(f"Silence detected for session {session_id}, sending to ElevenLabs...")
-                    
-                    # Get all buffered audio
-                    complete_audio = audio_buffer.get_audio()
-                    
-                    # Send acknowledgment
-                    await websocket.send_json({
-                        "status": "processing",
-                        "message": "Audio received, sending to ElevenLabs..."
-                    })
-                    
-                    try:
-                        # Convert audio to base64 and send to ElevenLabs
-                        import base64
-                        audio_base64 = base64.b64encode(complete_audio).decode('ascii')
-                        
-                        print(f"Sending {len(complete_audio)} bytes to ElevenLabs via connection {elevenlabs_connection_id}")
-                        
-                        # Send audio chunk to ElevenLabs
-                        await elevenlabs_ws_service.send_audio_chunk(
-                            connection_id=elevenlabs_connection_id,
-                            audio_data=complete_audio
-                        )
-                        
-                        print(f"✅ Successfully sent audio to ElevenLabs")
-                        
-                        # The response will be handled by the ElevenLabs service
-                        # and forwarded back to the client automatically
-                        
-                    except Exception as e:
-                        print(f"❌ Error sending to ElevenLabs: {e}")
-                        import traceback
-                        traceback.print_exc()
-                        await websocket.send_json({
-                            "status": "error",
-                            "error": str(e)
-                        })
-                    
-                    # Clear buffer for next utterance
-                    audio_buffer.clear()
-            
+                last_rx = time.monotonic()
+                # Forward each chunk immediately
+                await elevenlabs_ws_service.send_audio_chunk(
+                    connection_id=elevenlabs_connection_id,
+                    audio_data=audio_chunk
+                )
             elif "text" in data:
                 # Handle text messages (e.g., control messages)
                 message = data["text"]
@@ -1052,6 +988,10 @@ async def websocket_audio_endpoint(websocket: WebSocket, session_id: str):
                 
                 if message == "ping":
                     await websocket.send_json({"status": "pong"})
+                
+                elif message == "flush":
+                    # optional: no-op in stream-through mode
+                    await websocket.send_json({"status":"ok","message":"flush acknowledged"})
                     
     except WebSocketDisconnect:
         print(f"WebSocket disconnected for session: {session_id}")

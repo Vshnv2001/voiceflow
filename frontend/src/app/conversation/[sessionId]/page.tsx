@@ -37,6 +37,8 @@ export default function ConversationPage() {
   const [isSpeakerOn, setIsSpeakerOn] = useState(true)
   const [isVideoOn, setIsVideoOn] = useState(false)
   const [callDuration, setCallDuration] = useState(0)
+  const isMutedRef = useRef(isMuted)
+  useEffect(() => { isMutedRef.current = isMuted }, [isMuted])
   
   // WebSocket and audio
   const [isConnected, setIsConnected] = useState(false)
@@ -46,6 +48,14 @@ export default function ConversationPage() {
   const audioContextRef = useRef<AudioContext | null>(null)
   const processorRef = useRef<ScriptProcessorNode | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
+
+  // Stream gating + debug
+  const canStreamRef = useRef(false)
+  const lastEventTypesRef = useRef<string[]>([])
+
+  // Audio buffering for ElevenLabs audio_response
+  const audioChunksRef = useRef<ArrayBuffer[]>([])
+  const audioMimeRef = useRef<string>("audio/mpeg")
 
   useEffect(() => {
     if (session && session.customer_rep_id) {
@@ -57,21 +67,17 @@ export default function ConversationPage() {
   useEffect(() => {
     if (session?.status === 'active') {
       const startTime = new Date(session.created_at).getTime()
-      
       const interval = setInterval(() => {
         const now = new Date().getTime()
         const duration = Math.floor((now - startTime) / 1000)
         setCallDuration(duration)
       }, 1000)
-
       return () => clearInterval(interval)
     }
   }, [session?.status, session?.created_at])
 
   const loadRep = async (repId: string) => {
-    if (rep && rep.id === repId) {
-      return
-    }
+    if (rep && rep.id === repId) return
     try {
       setLoading(true)
       const { data, error } = await supabase
@@ -110,43 +116,81 @@ export default function ConversationPage() {
       streamRef.current = stream
       setStatusMessage("Microphone access granted")
       
+      // Build WS URL (wss on https) and allow override via env
+      const wsBase =
+        process.env.NEXT_PUBLIC_WS_BASE ??
+        `${location.protocol === "https:" ? "wss" : "ws"}://${location.hostname}:8000`
+      const wsUrl = `${wsBase}/ws/audio/${sessionId}`
+
       // Connect to WebSocket
-      const wsUrl = `ws://localhost:8000/ws/audio/${sessionId}`
       const ws = new WebSocket(wsUrl)
       wsRef.current = ws
       
       ws.onopen = () => {
         console.log("WebSocket connected")
         setIsConnected(true)
-        setStatusMessage("Connected - Speak now!")
+        setStatusMessage("Connecting to agent...")
+        // Start the audio graph now, but send frames only when canStreamRef is true
         startAudioCapture(stream, ws)
       }
       
       ws.onmessage = async (event) => {
+        // Fallback: server might send raw audio blobs (unlikely with new pipeline)
         if (event.data instanceof Blob) {
-          // Received audio response
-          console.log("Received audio response")
+          console.log("Received audio blob response")
           setStatusMessage("Playing response...")
           await playAudioBlob(event.data)
           setIsProcessing(false)
           setStatusMessage("Ready - Speak again!")
-        } else {
-          // Received JSON message
-          const message = JSON.parse(event.data)
-          console.log("WebSocket message:", message)
-          
-          if (message.status === "processing") {
-            setIsProcessing(true)
-            setStatusMessage(message.message || "Processing your audio...")
-          } else if (message.status === "complete") {
-            setStatusMessage("Response received!")
-            console.log("Transcript:", message.transcript)
-            console.log("Response:", message.response_text)
-          } else if (message.status === "error" || message.error) {
-            setStatusMessage(`Error: ${message.error}`)
-            setIsProcessing(false)
-          }
+          return
         }
+
+        // JSON message path
+        let msg: any
+        try {
+          msg = JSON.parse(event.data)
+        } catch {
+          console.log("Non-JSON message:", event.data)
+          return
+        }
+
+        if (msg?.type) {
+          lastEventTypesRef.current = [...lastEventTypesRef.current.slice(-20), msg.type]
+        }
+
+        // Heartbeat
+        if (msg.type === "ping") {
+          try {
+            ws.send(JSON.stringify({ type: "pong", timestamp: Date.now() }))
+          } catch {}
+          return
+        }
+
+        // Ready signals (either our backend or ElevenLabs initiation)
+        if (
+          msg.status === "ready" ||
+          msg.type === "conversation_initiation_metadata" ||
+          (msg.status === "connected" && msg.connection_id)
+        ) {
+          canStreamRef.current = true
+          setStatusMessage("Connected - Speak now!")
+          return
+        }
+
+        // Status updates
+        if (msg.status === "processing") {
+          setIsProcessing(true)
+          setStatusMessage(msg.message || "Processing your audio...")
+          return
+        }
+        if (msg.status === "error" || msg.error) {
+          setStatusMessage(`Error: ${msg.error || msg.status}`)
+          setIsProcessing(false)
+          return
+        }
+
+        // ElevenLabs events (forwarded by backend)
+        handleElevenLabsEvent(msg)
       }
       
       ws.onerror = (error) => {
@@ -157,6 +201,7 @@ export default function ConversationPage() {
       
       ws.onclose = () => {
         console.log("WebSocket disconnected")
+        canStreamRef.current = false
         setIsConnected(false)
         setStatusMessage("Disconnected")
         stopAudioCapture()
@@ -167,33 +212,100 @@ export default function ConversationPage() {
       setStatusMessage(`Error: ${error instanceof Error ? error.message : 'Failed to connect'}`)
     }
   }
+
+  // Helper: base64 -> Uint8Array
+  const b64ToU8 = (b64: string) => {
+    const bin = atob(b64)
+    const len = bin.length
+    const bytes = new Uint8Array(len)
+    for (let i = 0; i < len; i++) bytes[i] = bin.charCodeAt(i)
+    return bytes.buffer
+  }
+
+  // Handle ElevenLabs JSON events (audio_response chunks, transcripts, etc.)
+  const handleElevenLabsEvent = async (ev: any) => {
+    const t = (ev?.type || "").toLowerCase()
+
+    if (t === "user_transcript" && ev?.transcript) {
+      console.log("User transcript:", ev.transcript)
+    }
+    if (t === "agent_response" && ev?.text) {
+      console.log("Agent text:", ev.text)
+    }
+
+    if (t === "audio_response") {
+      const b64 =
+        ev.audio_base_64 ??
+        ev.audio?.audio_base_64 ??
+        ev.chunk ??
+        ev.payload_base64
+      if (b64) {
+        audioChunksRef.current.push(b64ToU8(b64))
+      }
+      if (ev.mime_type) audioMimeRef.current = ev.mime_type
+
+      // End-of-response heuristics
+      if (ev.is_final || ev.last_chunk || ev.event === "response_end") {
+        const blob = new Blob(audioChunksRef.current, {
+          type: audioMimeRef.current,
+        })
+        audioChunksRef.current = []
+        setIsProcessing(false)
+        setStatusMessage("Playing response...")
+        await playAudioBlob(blob)
+        setStatusMessage("Ready - Speak again!")
+      }
+    }
+  }
   
   // Start capturing audio from microphone
   const startAudioCapture = (stream: MediaStream, ws: WebSocket) => {
-    const audioContext = new AudioContext({ sampleRate: 16000 })
+    // Create AudioContext without specifying sample rate to avoid mismatch
+    const audioContext = new AudioContext()
     audioContextRef.current = audioContext
     
     const source = audioContext.createMediaStreamSource(stream)
     const processor = audioContext.createScriptProcessor(4096, 1, 1)
     processorRef.current = processor
-    
+
+    // Avoid echo: route through a muted gain node to keep graph alive
+    const sink = audioContext.createGain()
+    sink.gain.value = 0
+
     source.connect(processor)
-    processor.connect(audioContext.destination)
+    processor.connect(sink)
+    sink.connect(audioContext.destination)
     
     processor.onaudioprocess = (e) => {
-      if (ws.readyState === WebSocket.OPEN && !isMuted) {
-        const inputData = e.inputBuffer.getChannelData(0)
-        
-        // Convert float32 to int16
-        const int16Data = new Int16Array(inputData.length)
-        for (let i = 0; i < inputData.length; i++) {
-          const s = Math.max(-1, Math.min(1, inputData[i]))
-          int16Data[i] = s < 0 ? s * 0x8000 : s * 0x7FFF
+      // Gate on open, mute state, and server readiness
+      if (ws.readyState !== WebSocket.OPEN || isMutedRef.current || !canStreamRef.current) return
+
+      const inputData = e.inputBuffer.getChannelData(0)
+      
+      // Resample from AudioContext sample rate to 16kHz if needed
+      const targetSampleRate = 16000
+      const currentSampleRate = audioContext.sampleRate
+      let processedData = inputData
+      
+      // Only resample if the sample rates are different
+      if (currentSampleRate !== targetSampleRate) {
+        const ratio = currentSampleRate / targetSampleRate
+        const newLength = Math.floor(inputData.length / ratio)
+        processedData = new Float32Array(newLength)
+        for (let i = 0; i < newLength; i++) {
+          processedData[i] = inputData[Math.floor(i * ratio)]
         }
-        
-        // Send to WebSocket
-        ws.send(int16Data.buffer)
       }
+      
+      // Convert float32 to int16
+      const int16Data = new Int16Array(processedData.length)
+      for (let i = 0; i < processedData.length; i++) {
+        const s = Math.max(-1, Math.min(1, processedData[i]))
+        int16Data[i] = s < 0 ? s * 0x8000 : s * 0x7FFF
+      }
+      
+      // Send to WebSocket
+      ws.send(int16Data.buffer)
     }
   }
   
@@ -205,7 +317,7 @@ export default function ConversationPage() {
     }
     
     if (audioContextRef.current) {
-      audioContextRef.current.close()
+      audioContextRef.current.close().catch(() => {})
       audioContextRef.current = null
     }
     
@@ -215,10 +327,11 @@ export default function ConversationPage() {
     }
   }
   
-  // Play audio blob
+  // Play audio blob (respect Speaker toggle)
   const playAudioBlob = async (blob: Blob) => {
     const audioUrl = URL.createObjectURL(blob)
     const audio = new Audio(audioUrl)
+    audio.volume = isSpeakerOn ? 1 : 0
     
     return new Promise<void>((resolve) => {
       audio.onended = () => {
@@ -234,8 +347,9 @@ export default function ConversationPage() {
   
   // Disconnect WebSocket
   const disconnectWebSocket = () => {
+    canStreamRef.current = false
     if (wsRef.current) {
-      wsRef.current.close()
+      try { wsRef.current.close() } catch {}
       wsRef.current = null
     }
     stopAudioCapture()
@@ -250,7 +364,8 @@ export default function ConversationPage() {
       connectWebSocket()
     }
     // Don't disconnect on unmount - only disconnect via End Call button
-  }, [session?.status])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session?.status, isConnected])
 
   const formatDuration = (seconds: number) => {
     const mins = Math.floor(seconds / 60)
@@ -266,7 +381,7 @@ export default function ConversationPage() {
 
   const toggleMute = () => {
     setIsMuted(!isMuted)
-    setStatusMessage(isMuted ? "Microphone unmuted" : "Microphone muted")
+    setStatusMessage(!isMuted ? "Microphone muted" : "Microphone unmuted")
   }
 
   const toggleSpeaker = () => {
@@ -583,4 +698,3 @@ export default function ConversationPage() {
     </div>
   )
 }
-
