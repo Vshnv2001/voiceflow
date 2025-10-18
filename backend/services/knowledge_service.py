@@ -8,7 +8,12 @@ import uuid
 import traceback
 import hashlib
 import mimetypes
+import logging
 from typing import List, Dict, Any, Optional, Tuple
+import aiohttp
+import json
+import ssl
+import certifi
 from supabase import create_client, Client
 from datetime import datetime, timezone
 import aiofiles
@@ -27,6 +32,8 @@ from models.schemas import (
     KnowledgeDocumentResponse, KnowledgeChunkResponse, 
     KnowledgeCollectionResponse, RAGSearchResult, RAGSearchResponse
 )
+
+logger = logging.getLogger(__name__)
 
 class KnowledgeService:
     def __init__(self):
@@ -119,6 +126,7 @@ class KnowledgeService:
             return signed.get("signedURL") or signed.get("signed_url") or signed  # handle different client shapes
         except Exception as e:
             print(f"Failed to sign storage URL for {stored}: {e}")
+            print(traceback.format_exc())
             return None
 
     async def _upload_to_elevenlabs(
@@ -383,3 +391,125 @@ class KnowledgeService:
         except Exception as e:
             print(f"Error deleting collection: {e}")
             raise e
+    
+    async def get_user_elevenlabs_file_ids(self, user_id: str) -> List[str]:
+        """Get all elevenlabs_file_id values for a user's processed documents"""
+        try:
+            # Get all processed documents for the user
+            documents = await self.db_service.get_knowledge_documents(
+                user_id=user_id,
+                status="processed",
+                limit=1000  # Get all processed documents
+            )
+            
+            # Extract elevenlabs_file_id values, filtering out None/empty values
+            file_ids = [
+                doc["elevenlabs_file_id"] 
+                for doc in documents 
+                if doc.get("elevenlabs_file_id")
+            ]
+            
+            print(f"Found {len(file_ids)} ElevenLabs file IDs for user {user_id}")
+            return file_ids
+            
+        except Exception as e:
+            print(f"Error getting ElevenLabs file IDs for user {user_id}: {e}")
+            return []
+    
+    async def update_agent_with_knowledge_base(self, agent_id: str, user_id: str) -> bool:
+        """Update an agent to use the user's knowledge base documents"""
+        try:
+            # Get all processed file IDs for the user
+            file_ids = await self.get_user_elevenlabs_file_ids(user_id)
+            
+            if not file_ids:
+                print(f"No knowledge base documents found for user {user_id}")
+                return True  # Not an error, just no documents to add
+            
+            # Create knowledge base locators for the agent update
+            knowledge_base = [
+                {
+                    "type": "file",
+                    "name": f"Document.txt",
+                    "id": file_id,
+                    "usage_mode": "auto"
+                }
+                for i, file_id in enumerate(file_ids)
+            ]
+            
+            # Prepare the agent update payload
+            update_payload = {
+                "conversation_config": {
+                    "agent": {
+                        "prompt": {
+                            "knowledge_base": knowledge_base
+                        },
+                    }
+                }
+            }
+            
+            # Update the agent using ElevenLabs API with SSL context handling
+            
+            url = f"https://api.elevenlabs.io/v1/convai/agents/{agent_id}"
+            headers = {
+                "xi-api-key": self.elevenlabs_api_key,
+                "Content-Type": "application/json"
+            }
+            
+            # Create SSL context with proper certificate handling
+            ssl_context = ssl.create_default_context()
+            try:
+                # Try with certifi certificates first
+                ssl_context.load_verify_locations(certifi.where())
+                print("Using certifi certificates for SSL verification")
+            except Exception as cert_error:
+                print(f"Failed to load certifi certificates: {cert_error}")
+                # Fallback to system certificates
+                ssl_context = ssl.create_default_context()
+                print("Using system certificates for SSL verification")
+            
+            # Create connector with SSL context
+            connector = aiohttp.TCPConnector(ssl=ssl_context)
+            
+            try:
+                async with aiohttp.ClientSession(connector=connector) as session:
+                    async with session.patch(url, headers=headers, json=update_payload) as response:
+                        if response.status == 200:
+                            print(f"Successfully updated agent {agent_id} with {len(file_ids)} knowledge base documents")
+                            return True
+                        else:
+                            error_text = await response.text()
+                            print(f"Failed to update agent {agent_id}: {response.status} - {error_text}")
+                            return False
+                            
+            except ssl.SSLError as ssl_error:
+                print(f"SSL verification failed, retrying without verification: {ssl_error}")
+                # Fallback: disable SSL verification (less secure but works)
+                ssl_context_insecure = ssl.create_default_context()
+                ssl_context_insecure.check_hostname = False
+                ssl_context_insecure.verify_mode = ssl.CERT_NONE
+                
+                connector_insecure = aiohttp.TCPConnector(ssl=ssl_context_insecure)
+                
+                async with aiohttp.ClientSession(connector=connector_insecure) as session:
+                    async with session.patch(url, headers=headers, json=update_payload) as response:
+                        if response.status == 200:
+                            print(f"Successfully updated agent {agent_id} with {len(file_ids)} knowledge base documents (insecure SSL)")
+                            return True
+                        else:
+                            error_text = await response.text()
+                            print(f"Failed to update agent {agent_id}: {response.status} - {error_text}")
+                            return False
+                        
+        except Exception as e:
+            print(f"Error updating agent {agent_id} with knowledge base: {e}")
+            return False
+    
+    async def refresh_agent_knowledge_base(self, agent_id: str, user_id: str) -> bool:
+        """Refresh the agent's knowledge base with the latest documents"""
+        try:
+            logger.info(f"Refreshing knowledge base for agent {agent_id} with user {user_id}'s documents")
+            return await self.update_agent_with_knowledge_base(agent_id, user_id)
+        except Exception as e:
+            logger.error(f"Error refreshing agent knowledge base: {e}")
+            return False
