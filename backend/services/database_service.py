@@ -444,3 +444,293 @@ class DatabaseService:
         except Exception as e:
             print(f"Error getting message analytics: {e}")
             return {"total_messages": 0, "voice_messages": 0, "ai_messages": 0, "approved_messages": 0, "edited_messages": 0, "messages": []}
+    
+    # ==================== KNOWLEDGE BASE OPERATIONS ====================
+    
+    async def create_knowledge_document(
+        self,
+        user_id: str,
+        title: str,
+        description: Optional[str],
+        file_name: str,
+        file_type: str,
+        file_size: int,
+        file_url: str
+    ) -> Dict[str, Any]:
+        """Create a knowledge document"""
+        try:
+            data = {
+                "user_id": user_id,
+                "title": title,
+                "description": description,
+                "file_name": file_name,
+                "file_type": file_type,
+                "file_size": file_size,
+                "file_url": file_url,
+                "status": "processing"
+            }
+            
+            result = self.supabase.table("knowledge_documents").insert(data).execute()
+            return result.data[0]
+            
+        except Exception as e:
+            print(f"Error creating knowledge document: {e}")
+            raise Exception(f"Failed to create knowledge document: {str(e)}")
+    
+    async def update_knowledge_document(
+        self,
+        document_id: str,
+        content_text: Optional[str] = None,
+        status: Optional[str] = None,
+        processing_error: Optional[str] = None
+    ) -> bool:
+        """Update a knowledge document"""
+        try:
+            update_data = {}
+            if content_text is not None:
+                update_data["content_text"] = content_text
+            if status is not None:
+                update_data["status"] = status
+            if processing_error is not None:
+                update_data["processing_error"] = processing_error
+            
+            result = self.supabase.table("knowledge_documents").update(update_data).eq("id", document_id).execute()
+            return len(result.data) > 0
+            
+        except Exception as e:
+            print(f"Error updating knowledge document: {e}")
+            return False
+    
+    async def get_knowledge_document(self, document_id: str, user_id: str) -> Optional[Dict[str, Any]]:
+        """Get a knowledge document by ID"""
+        try:
+            result = self.supabase.table("knowledge_documents").select("*").eq("id", document_id).eq("user_id", user_id).execute()
+            return result.data[0] if result.data else None
+            
+        except Exception as e:
+            print(f"Error getting knowledge document: {e}")
+            return None
+    
+    async def get_knowledge_documents(
+        self,
+        user_id: str,
+        collection_id: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0
+    ) -> List[Dict[str, Any]]:
+        """Get user's knowledge documents"""
+        try:
+            query = self.supabase.table("knowledge_documents").select("*").eq("user_id", user_id)
+            
+            if collection_id:
+                # Join with document_collections table
+                query = query.in_("id", 
+                    self.supabase.table("document_collections")
+                    .select("document_id")
+                    .eq("collection_id", collection_id)
+                    .execute()
+                    .data
+                )
+            
+            if status:
+                query = query.eq("status", status)
+            
+            query = query.order("created_at", desc=True).range(offset, offset + limit - 1)
+            result = query.execute()
+            return result.data
+            
+        except Exception as e:
+            print(f"Error getting knowledge documents: {e}")
+            return []
+    
+    async def delete_knowledge_document(self, document_id: str, user_id: str) -> bool:
+        """Delete a knowledge document"""
+        try:
+            result = self.supabase.table("knowledge_documents").delete().eq("id", document_id).eq("user_id", user_id).execute()
+            return len(result.data) > 0
+            
+        except Exception as e:
+            print(f"Error deleting knowledge document: {e}")
+            return False
+    
+    async def create_knowledge_chunk(
+        self,
+        document_id: str,
+        chunk_index: int,
+        content: str,
+        content_length: int,
+        embedding: List[float],
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Create a knowledge chunk with embedding"""
+        try:
+            data = {
+                "document_id": document_id,
+                "chunk_index": chunk_index,
+                "content": content,
+                "content_length": content_length,
+                "embedding": embedding,
+                "metadata": metadata or {}
+            }
+            
+            result = self.supabase.table("knowledge_chunks").insert(data).execute()
+            return result.data[0]
+            
+        except Exception as e:
+            print(f"Error creating knowledge chunk: {e}")
+            raise Exception(f"Failed to create knowledge chunk: {str(e)}")
+    
+    async def search_knowledge_chunks(
+        self,
+        query_embedding: List[float],
+        user_id: str,
+        collection_ids: Optional[List[str]] = None,
+        limit: int = 5,
+        similarity_threshold: float = 0.7
+    ) -> List[Dict[str, Any]]:
+        """Search knowledge chunks using vector similarity"""
+        try:
+            # Build the query with vector similarity search
+            # Note: This requires pgvector extension and proper setup
+            query = f"""
+            SELECT 
+                kc.id as chunk_id,
+                kc.document_id,
+                kd.title as document_title,
+                kc.content,
+                kc.metadata,
+                1 - (kc.embedding <=> '{query_embedding}') as similarity_score
+            FROM knowledge_chunks kc
+            JOIN knowledge_documents kd ON kc.document_id = kd.id
+            WHERE kd.user_id = '{user_id}'
+            AND 1 - (kc.embedding <=> '{query_embedding}') > {similarity_threshold}
+            """
+            
+            if collection_ids:
+                collection_filter = "', '".join(collection_ids)
+                query += f"""
+                AND kc.document_id IN (
+                    SELECT document_id FROM document_collections 
+                    WHERE collection_id IN ('{collection_filter}')
+                )
+                """
+            
+            query += f"""
+            ORDER BY similarity_score DESC
+            LIMIT {limit}
+            """
+            
+            result = self.supabase.rpc('execute_sql', {'query': query}).execute()
+            return result.data if result.data else []
+            
+        except Exception as e:
+            print(f"Error searching knowledge chunks: {e}")
+            # Fallback to simple text search if vector search fails
+            return await self._fallback_text_search(user_id, collection_ids, limit)
+    
+    async def _fallback_text_search(
+        self,
+        user_id: str,
+        collection_ids: Optional[List[str]] = None,
+        limit: int = 5
+    ) -> List[Dict[str, Any]]:
+        """Fallback text search when vector search is not available"""
+        try:
+            query = self.supabase.table("knowledge_chunks").select(
+                "id, document_id, content, metadata, knowledge_documents(title)"
+            ).eq("knowledge_documents.user_id", user_id).limit(limit)
+            
+            result = query.execute()
+            return [{
+                "chunk_id": chunk["id"],
+                "document_id": chunk["document_id"],
+                "document_title": chunk["knowledge_documents"]["title"],
+                "content": chunk["content"],
+                "similarity_score": 0.5,  # Default score for fallback
+                "metadata": chunk["metadata"]
+            } for chunk in result.data]
+            
+        except Exception as e:
+            print(f"Error in fallback text search: {e}")
+            return []
+    
+    async def create_knowledge_collection(
+        self,
+        user_id: str,
+        name: str,
+        description: Optional[str],
+        is_public: bool = False
+    ) -> Dict[str, Any]:
+        """Create a knowledge collection"""
+        try:
+            data = {
+                "user_id": user_id,
+                "name": name,
+                "description": description,
+                "is_public": is_public
+            }
+            
+            result = self.supabase.table("knowledge_collections").insert(data).execute()
+            return result.data[0]
+            
+        except Exception as e:
+            print(f"Error creating knowledge collection: {e}")
+            raise Exception(f"Failed to create knowledge collection: {str(e)}")
+    
+    async def get_knowledge_collections(
+        self,
+        user_id: str,
+        include_public: bool = True,
+        limit: int = 50,
+        offset: int = 0
+    ) -> List[Dict[str, Any]]:
+        """Get user's knowledge collections"""
+        try:
+            if include_public:
+                query = self.supabase.table("knowledge_collections").select("*").or_(f"user_id.eq.{user_id},is_public.eq.true")
+            else:
+                query = self.supabase.table("knowledge_collections").select("*").eq("user_id", user_id)
+            
+            query = query.order("created_at", desc=True).range(offset, offset + limit - 1)
+            result = query.execute()
+            return result.data
+            
+        except Exception as e:
+            print(f"Error getting knowledge collections: {e}")
+            return []
+    
+    async def delete_knowledge_collection(self, collection_id: str, user_id: str) -> bool:
+        """Delete a knowledge collection"""
+        try:
+            result = self.supabase.table("knowledge_collections").delete().eq("id", collection_id).eq("user_id", user_id).execute()
+            return len(result.data) > 0
+            
+        except Exception as e:
+            print(f"Error deleting knowledge collection: {e}")
+            return False
+    
+    async def add_document_to_collection(self, document_id: str, collection_id: str) -> bool:
+        """Add a document to a collection"""
+        try:
+            data = {
+                "document_id": document_id,
+                "collection_id": collection_id
+            }
+            
+            result = self.supabase.table("document_collections").insert(data).execute()
+            return len(result.data) > 0
+            
+        except Exception as e:
+            print(f"Error adding document to collection: {e}")
+            return False
+    
+    async def remove_document_from_collection(self, document_id: str, collection_id: str) -> bool:
+        """Remove a document from a collection"""
+        try:
+            result = self.supabase.table("document_collections").delete().eq("document_id", document_id).eq("collection_id", collection_id).execute()
+            return len(result.data) > 0
+            
+        except Exception as e:
+            print(f"Error removing document from collection: {e}")
+            return False

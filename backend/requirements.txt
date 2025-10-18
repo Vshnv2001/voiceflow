@@ -36,6 +36,15 @@ pydub
 openai
 elevenlabs
 
+# Document processing for knowledge base
+PyPDF2
+python-docx
+markdown
+aiofiles
+
+# Vector database support (for embeddings)
+pgvector
+
 # Background tasks
 celery
 redis

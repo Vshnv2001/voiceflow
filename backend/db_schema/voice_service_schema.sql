@@ -232,6 +232,164 @@ INSERT INTO system_config (key, value, description, is_encrypted) VALUES
 ('max_voice_duration', '300', 'Maximum voice message duration in seconds', false)
 ON CONFLICT (key) DO NOTHING;
 
+-- 7. Knowledge base documents table - stores uploaded documents and their metadata
+CREATE TABLE IF NOT EXISTS knowledge_documents (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    description TEXT,
+    file_name TEXT NOT NULL,
+    file_type TEXT NOT NULL, -- 'pdf', 'txt', 'docx', 'md', etc.
+    file_size BIGINT NOT NULL,
+    file_url TEXT NOT NULL, -- URL to stored file
+    content_text TEXT, -- Extracted text content
+    status TEXT NOT NULL DEFAULT 'processing' CHECK (status IN ('processing', 'processed', 'failed')),
+    processing_error TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- 8. Knowledge base chunks table - stores text chunks with embeddings for RAG
+CREATE TABLE IF NOT EXISTS knowledge_chunks (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    document_id UUID NOT NULL REFERENCES knowledge_documents(id) ON DELETE CASCADE,
+    chunk_index INTEGER NOT NULL, -- Order within the document
+    content TEXT NOT NULL,
+    content_length INTEGER NOT NULL,
+    embedding VECTOR(1536), -- OpenAI text-embedding-3-small embedding (1536 dimensions)
+    metadata JSONB DEFAULT '{}'::jsonb, -- Store additional chunk metadata
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- 9. Knowledge base collections table - for organizing documents
+CREATE TABLE IF NOT EXISTS knowledge_collections (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    description TEXT,
+    is_public BOOLEAN DEFAULT false,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- 10. Document-collection mapping table
+CREATE TABLE IF NOT EXISTS document_collections (
+    document_id UUID NOT NULL REFERENCES knowledge_documents(id) ON DELETE CASCADE,
+    collection_id UUID NOT NULL REFERENCES knowledge_collections(id) ON DELETE CASCADE,
+    PRIMARY KEY (document_id, collection_id)
+);
+
+-- Create indexes for knowledge base tables
+CREATE INDEX IF NOT EXISTS idx_knowledge_documents_user_id ON knowledge_documents(user_id);
+CREATE INDEX IF NOT EXISTS idx_knowledge_documents_status ON knowledge_documents(status);
+CREATE INDEX IF NOT EXISTS idx_knowledge_documents_file_type ON knowledge_documents(file_type);
+CREATE INDEX IF NOT EXISTS idx_knowledge_documents_created_at ON knowledge_documents(created_at);
+
+CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_document_id ON knowledge_chunks(document_id);
+CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_chunk_index ON knowledge_chunks(document_id, chunk_index);
+-- Vector similarity search index (using pgvector)
+CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_embedding ON knowledge_chunks USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+
+CREATE INDEX IF NOT EXISTS idx_knowledge_collections_user_id ON knowledge_collections(user_id);
+CREATE INDEX IF NOT EXISTS idx_knowledge_collections_is_public ON knowledge_collections(is_public);
+
+CREATE INDEX IF NOT EXISTS idx_document_collections_document_id ON document_collections(document_id);
+CREATE INDEX IF NOT EXISTS idx_document_collections_collection_id ON document_collections(collection_id);
+
+-- Enable RLS for knowledge base tables
+ALTER TABLE knowledge_documents ENABLE ROW LEVEL SECURITY;
+ALTER TABLE knowledge_chunks ENABLE ROW LEVEL SECURITY;
+ALTER TABLE knowledge_collections ENABLE ROW LEVEL SECURITY;
+ALTER TABLE document_collections ENABLE ROW LEVEL SECURITY;
+
+-- RLS Policies for knowledge_documents
+CREATE POLICY "Users can view their own documents" ON knowledge_documents
+    FOR SELECT USING (auth.uid() = user_id);
+
+CREATE POLICY "Users can create their own documents" ON knowledge_documents
+    FOR INSERT WITH CHECK (auth.uid() = user_id);
+
+CREATE POLICY "Users can update their own documents" ON knowledge_documents
+    FOR UPDATE USING (auth.uid() = user_id);
+
+CREATE POLICY "Users can delete their own documents" ON knowledge_documents
+    FOR DELETE USING (auth.uid() = user_id);
+
+-- RLS Policies for knowledge_chunks
+CREATE POLICY "Users can view chunks from their documents" ON knowledge_chunks
+    FOR SELECT USING (
+        document_id IN (
+            SELECT id FROM knowledge_documents WHERE user_id = auth.uid()
+        )
+    );
+
+CREATE POLICY "Users can create chunks for their documents" ON knowledge_chunks
+    FOR INSERT WITH CHECK (
+        document_id IN (
+            SELECT id FROM knowledge_documents WHERE user_id = auth.uid()
+        )
+    );
+
+CREATE POLICY "Users can update chunks from their documents" ON knowledge_chunks
+    FOR UPDATE USING (
+        document_id IN (
+            SELECT id FROM knowledge_documents WHERE user_id = auth.uid()
+        )
+    );
+
+CREATE POLICY "Users can delete chunks from their documents" ON knowledge_chunks
+    FOR DELETE USING (
+        document_id IN (
+            SELECT id FROM knowledge_documents WHERE user_id = auth.uid()
+        )
+    );
+
+-- RLS Policies for knowledge_collections
+CREATE POLICY "Users can view their own collections and public ones" ON knowledge_collections
+    FOR SELECT USING (auth.uid() = user_id OR is_public = true);
+
+CREATE POLICY "Users can create their own collections" ON knowledge_collections
+    FOR INSERT WITH CHECK (auth.uid() = user_id);
+
+CREATE POLICY "Users can update their own collections" ON knowledge_collections
+    FOR UPDATE USING (auth.uid() = user_id);
+
+CREATE POLICY "Users can delete their own collections" ON knowledge_collections
+    FOR DELETE USING (auth.uid() = user_id);
+
+-- RLS Policies for document_collections
+CREATE POLICY "Users can view document-collection mappings for their documents" ON document_collections
+    FOR SELECT USING (
+        document_id IN (
+            SELECT id FROM knowledge_documents WHERE user_id = auth.uid()
+        )
+    );
+
+CREATE POLICY "Users can create document-collection mappings for their documents" ON document_collections
+    FOR INSERT WITH CHECK (
+        document_id IN (
+            SELECT id FROM knowledge_documents WHERE user_id = auth.uid()
+        )
+    );
+
+CREATE POLICY "Users can delete document-collection mappings for their documents" ON document_collections
+    FOR DELETE USING (
+        document_id IN (
+            SELECT id FROM knowledge_documents WHERE user_id = auth.uid()
+        )
+    );
+
+-- Create triggers for knowledge base tables
+CREATE TRIGGER update_knowledge_documents_updated_at 
+    BEFORE UPDATE ON knowledge_documents 
+    FOR EACH ROW 
+    EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_knowledge_collections_updated_at 
+    BEFORE UPDATE ON knowledge_collections 
+    FOR EACH ROW 
+    EXECUTE FUNCTION update_updated_at_column();
+
 -- Insert default ElevenLabs voices
 INSERT INTO available_voices (voice_id, name, description, category, language) VALUES
 ('pNInz6obpgDQGcFmaJgB', 'Adam', 'A calm, confident male voice', 'male', 'en'),

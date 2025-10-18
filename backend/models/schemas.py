@@ -210,3 +210,88 @@ class PaginatedResponse(BaseModel):
     limit: int
     offset: int
     has_more: bool
+
+# ==================== KNOWLEDGE BASE SCHEMAS ====================
+
+class DocumentStatus(str, Enum):
+    PROCESSING = "processing"
+    PROCESSED = "processed"
+    FAILED = "failed"
+
+class KnowledgeDocumentCreate(BaseModel):
+    title: str
+    description: Optional[str] = None
+    collection_ids: Optional[List[str]] = None
+
+class KnowledgeDocumentResponse(BaseModel):
+    id: str
+    user_id: str
+    title: str
+    description: Optional[str]
+    file_name: str
+    file_type: str
+    file_size: int
+    file_url: str
+    content_text: Optional[str]
+    status: DocumentStatus
+    processing_error: Optional[str]
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class KnowledgeChunkResponse(BaseModel):
+    id: str
+    document_id: str
+    chunk_index: int
+    content: str
+    content_length: int
+    metadata: Dict[str, Any]
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class KnowledgeCollectionCreate(BaseModel):
+    name: str
+    description: Optional[str] = None
+    is_public: bool = False
+
+class KnowledgeCollectionResponse(BaseModel):
+    id: str
+    user_id: str
+    name: str
+    description: Optional[str]
+    is_public: bool
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class DocumentUploadResponse(BaseModel):
+    document_id: str
+    file_url: str
+    status: str = "processing"
+    message: str
+
+class RAGSearchRequest(BaseModel):
+    query: str
+    collection_ids: Optional[List[str]] = None
+    limit: int = Field(default=5, ge=1, le=20)
+    similarity_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
+
+class RAGSearchResult(BaseModel):
+    chunk_id: str
+    document_id: str
+    document_title: str
+    content: str
+    similarity_score: float
+    metadata: Dict[str, Any]
+
+class RAGSearchResponse(BaseModel):
+    query: str
+    results: List[RAGSearchResult]
+    total_results: int
+    search_time_ms: float
