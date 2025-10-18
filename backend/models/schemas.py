@@ -305,3 +305,130 @@ class RAGSearchResponse(BaseModel):
     results: List[RAGSearchResult]
     total_results: int
     search_time_ms: float
+
+# ==================== ELEVENLABS WEBSOCKET SCHEMAS ====================
+
+class ElevenLabsWebSocketMessage(BaseModel):
+    """Base class for ElevenLabs WebSocket messages"""
+    message_type: str
+
+class UserAudioChunk(ElevenLabsWebSocketMessage):
+    """User audio chunk message"""
+    message_type: str = "user_audio_chunk"
+    audio_chunk: bytes
+    timestamp: Optional[float] = None
+
+class ConversationInitiationClientData(ElevenLabsWebSocketMessage):
+    """Conversation initiation data"""
+    message_type: str = "conversation_initiation_client_data"
+    user_id: str
+    session_id: str
+    agent_id: str
+    metadata: Optional[Dict[str, Any]] = Field(default_factory=dict)
+
+class UserMessage(ElevenLabsWebSocketMessage):
+    """User text message"""
+    message_type: str = "user_message"
+    text: str
+    timestamp: Optional[float] = None
+
+class UserActivity(ElevenLabsWebSocketMessage):
+    """User activity message"""
+    message_type: str = "user_activity"
+    activity_type: str  # e.g., "typing", "speaking", "listening"
+    timestamp: Optional[float] = None
+
+class Pong(ElevenLabsWebSocketMessage):
+    """Pong response to ping"""
+    message_type: str = "pong"
+
+class ClientToolResult(ElevenLabsWebSocketMessage):
+    """Client tool result"""
+    message_type: str = "client_tool_result"
+    tool_call_id: str
+    result: Dict[str, Any]
+
+class ContextualUpdate(ElevenLabsWebSocketMessage):
+    """Contextual update message"""
+    message_type: str = "contextual_update"
+    context: Dict[str, Any]
+
+# Response schemas
+class ConversationInitiationMetadata(BaseModel):
+    """Conversation initiation metadata response"""
+    message_type: str = "conversation_initiation_metadata"
+    agent_id: str
+    session_id: str
+    conversation_id: str
+    metadata: Dict[str, Any]
+
+class UserTranscript(BaseModel):
+    """User transcript response"""
+    message_type: str = "user_transcript"
+    text: str
+    is_final: bool
+    timestamp: float
+    confidence: Optional[float] = None
+
+class AgentResponse(BaseModel):
+    """Agent response"""
+    message_type: str = "agent_response"
+    text: str
+    timestamp: float
+    is_final: bool
+
+class AudioResponse(BaseModel):
+    """Audio response from agent"""
+    message_type: str = "audio_response"
+    audio_chunk: bytes
+    timestamp: float
+    is_final: bool
+
+class Interruption(BaseModel):
+    """Interruption message"""
+    message_type: str = "interruption"
+    timestamp: float
+
+class Ping(BaseModel):
+    """Ping message"""
+    message_type: str = "ping"
+    timestamp: float
+
+class ClientToolCall(BaseModel):
+    """Client tool call request"""
+    message_type: str = "client_tool_call"
+    tool_call_id: str
+    function_name: str
+    parameters: Dict[str, Any]
+
+class VADScore(BaseModel):
+    """Voice Activity Detection score"""
+    message_type: str = "vad_score"
+    score: float
+    timestamp: float
+
+class InternalTentativeAgentResponse(BaseModel):
+    """Internal tentative agent response"""
+    message_type: str = "internal_tentative_agent_response"
+    text: str
+    timestamp: float
+
+class AgentResponseCorrection(BaseModel):
+    """Agent response correction"""
+    message_type: str = "agent_response_correction"
+    original_text: str
+    corrected_text: str
+    timestamp: float
+
+class WebSocketConnectionRequest(BaseModel):
+    """Request to establish WebSocket connection"""
+    agent_id: str
+    session_id: str
+    user_id: str
+    metadata: Optional[Dict[str, Any]] = Field(default_factory=dict)
+
+class WebSocketConnectionResponse(BaseModel):
+    """Response for WebSocket connection"""
+    connection_id: str
+    status: str
+    message: str

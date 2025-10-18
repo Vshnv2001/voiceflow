@@ -3,7 +3,7 @@ VoiceFlow AI - Voice-based Customer Service Backend
 FastAPI application for handling voice messages, AI responses, and agent approvals
 """
 
-from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, BackgroundTasks, Form
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, BackgroundTasks, Form, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
@@ -12,21 +12,27 @@ import asyncio
 import os
 from datetime import datetime
 import uuid
+import json
+import logging
 
 import uvicorn
+
+# Configure logging
+logger = logging.getLogger(__name__)
 
 from services.voice_service import VoiceService
 from services.ai_service import AIService
 from services.database_service import DatabaseService
 from services.auth_service import AuthService
 from services.knowledge_service import KnowledgeService
+from services.elevenlabs_websocket_service import ElevenLabsWebSocketService
 from models.schemas import (
     SessionCreate, SessionResponse, MessageCreate, MessageResponse,
     VoiceProcessingJobResponse, AgentApprovalRequest, SystemConfigUpdate,
     VoiceResponse, VoiceSynthesisRequest, VoiceSynthesisResponse,
     KnowledgeDocumentCreate, KnowledgeDocumentResponse, KnowledgeCollectionCreate,
     KnowledgeCollectionResponse, DocumentUploadResponse, RAGSearchRequest, RAGSearchResponse,
-    CustomerServiceCallRequest
+    CustomerServiceCallRequest, WebSocketConnectionRequest, WebSocketConnectionResponse
 )
 
 # Initialize FastAPI app
@@ -54,6 +60,12 @@ ai_service = AIService()
 db_service = DatabaseService()
 auth_service = AuthService()
 knowledge_service = KnowledgeService()
+
+# Initialize ElevenLabs WebSocket service
+elevenlabs_api_key = os.getenv("ELEVENLABS_API_KEY")
+if not elevenlabs_api_key:
+    raise ValueError("ELEVENLABS_API_KEY environment variable is required")
+elevenlabs_ws_service = ElevenLabsWebSocketService(elevenlabs_api_key)
 
 # Dependency to get current user
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
@@ -717,6 +729,111 @@ async def process_voice_synthesis(message_id: str, text: str, voice_id: str):
         # Update job status to failed
         if job_id:
             await db_service.update_voice_job(job_id, "failed", error_message=str(e))
+
+# ==================== WEBSOCKET ENDPOINTS ====================
+
+@app.websocket("/ws/elevenlabs/{agent_id}")
+async def websocket_endpoint(
+    websocket: WebSocket,
+    agent_id: str
+):
+    """WebSocket endpoint for ElevenLabs agent conversations"""
+    await websocket.accept()
+    
+    try:
+        # Get query parameters
+        query_params = websocket.query_params
+        session_id = query_params.get("session_id")
+        user_id = query_params.get("user_id")
+        
+        # Validate required parameters
+        if not session_id or not user_id:
+            await websocket.close(code=1008, reason="Missing session_id or user_id")
+            return
+        
+        # Create WebSocket connection
+        connection_id = await elevenlabs_ws_service.create_connection(
+            websocket=websocket,
+            agent_id=agent_id,
+            session_id=session_id,
+            user_id=user_id
+        )
+        
+        # Send connection confirmation
+        await websocket.send_json({
+            "type": "connection_established",
+            "connection_id": connection_id,
+            "agent_id": agent_id,
+            "session_id": session_id,
+            "user_id": user_id
+        })
+        
+        # Wait for the connection to be closed by the ElevenLabs service
+        # The message forwarding is handled by the service's background task
+        try:
+            while True:
+                # Just keep the connection alive - message handling is done by the service
+                await asyncio.sleep(1)
+        except WebSocketDisconnect:
+            pass
+                
+    except Exception as e:
+        logger.error(f"WebSocket connection error: {e}")
+        try:
+            await websocket.close(code=1011, reason="Internal server error")
+        except:
+            pass
+    finally:
+        # Clean up connection
+        if 'connection_id' in locals():
+            await elevenlabs_ws_service.close_connection(connection_id)
+
+@app.post("/api/websocket/connect", response_model=WebSocketConnectionResponse)
+async def create_websocket_connection(
+    request: WebSocketConnectionRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """Create a WebSocket connection for ElevenLabs agent"""
+    try:
+        # Validate session belongs to user
+        session = await db_service.get_session(request.session_id, current_user["id"])
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+        
+        # Generate connection URL
+        connection_url = f"/ws/elevenlabs/{request.agent_id}?session_id={request.session_id}&user_id={current_user['id']}"
+        
+        return WebSocketConnectionResponse(
+            connection_id="pending",  # Will be set when WebSocket connects
+            status="ready",
+            message=f"Connect to WebSocket at: {connection_url}"
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/websocket/connections")
+async def list_websocket_connections(
+    current_user: dict = Depends(get_current_user)
+):
+    """List active WebSocket connections"""
+    try:
+        connections = elevenlabs_ws_service.list_connections()
+        return {"connections": connections}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/websocket/connections/{connection_id}")
+async def close_websocket_connection(
+    connection_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Close a WebSocket connection"""
+    try:
+        await elevenlabs_ws_service.close_connection(connection_id)
+        return {"message": "Connection closed successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ==================== HEALTH CHECK ====================
 
