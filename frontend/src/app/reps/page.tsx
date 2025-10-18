@@ -1,6 +1,7 @@
 "use client"
 
 import { useState, useEffect } from "react"
+import { useRouter } from "next/navigation"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Avatar } from "@/components/ui/avatar"
@@ -26,6 +27,7 @@ interface Rep {
 }
 
 export default function RepsPage() {
+  const router = useRouter()
   const [reps, setReps] = useState<Rep[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -192,7 +194,11 @@ export default function RepsPage() {
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
             {reps.map((rep) => (
-              <Card key={rep.id} className="hover:shadow-lg transition-shadow">
+              <Card 
+                key={rep.id} 
+                className="hover:shadow-lg transition-shadow cursor-pointer hover:scale-105 transform transition-transform"
+                onClick={() => router.push(`/reps/${rep.id}`)}
+              >
                 <CardHeader className="pb-4">
                   <div className="flex items-center gap-4">
                     <Avatar className="h-12 w-12">
