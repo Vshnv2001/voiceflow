@@ -13,7 +13,7 @@ load_dotenv()
 class DatabaseService:
     def __init__(self):
         self.supabase_url = os.getenv("SUPABASE_URL")
-        self.supabase_key = os.getenv("SUPABASE_ANON_KEY")
+        self.supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
         self.supabase: Client = create_client(self.supabase_url, self.supabase_key)
     
     # ==================== SESSION OPERATIONS ====================
@@ -322,7 +322,12 @@ class DatabaseService:
             
         except Exception as e:
             print(f"Error getting system config: {e}")
-            return {}
+            # Return default config if database access fails
+            return {
+                "default_voice_id": "pNInz6obpgDQGcFmaJgB",
+                "ai_model": "gpt-4o-mini",
+                "ai_temperature": "0.7"
+            }
     
     async def update_system_config(self, config_updates: List[Dict[str, str]]) -> bool:
         """Update system configuration"""

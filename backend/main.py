@@ -410,7 +410,7 @@ async def process_voice_transcription(message_id: str, audio_url: str):
         )
         
         # Transcribe using ElevenLabs
-        transcription = await voice_service.transcribe_audio(audio_url)
+        transcription = await voice_service.transcribe_audio(audio_url, language_code="eng", diarize=True)
         
         # Update message with transcription
         await db_service.update_message(
@@ -434,7 +434,7 @@ async def process_ai_response_generation(message_id: str):
         if not message or not message.voice_transcription:
             return
         
-        # Generate AI response using Groq
+        # Generate AI response using OpenAI
         ai_response = await ai_service.generate_response(
             user_message=message.voice_transcription,
             session_id=message.session_id
@@ -450,7 +450,7 @@ async def process_ai_response_generation(message_id: str):
             message_type="ai_generated",
             text_content=ai_response,
             voice_id=voice_id,
-            ai_model="groq/llama-3.1-70b-versatile"
+            ai_model="gpt-4o-mini"
         )
         
     except Exception as e:

@@ -180,7 +180,7 @@ class VoiceUploadResponse(BaseModel):
 
 class AIResponseRequest(BaseModel):
     message_id: str
-    model: Optional[str] = "groq/llama-3.1-70b-versatile"
+    model: Optional[str] = "gpt-4o-mini"
     temperature: Optional[float] = 0.7
     max_tokens: Optional[int] = 1000
 

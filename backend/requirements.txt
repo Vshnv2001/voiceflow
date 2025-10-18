@@ -15,6 +15,7 @@ supabase_functions
 # HTTP client for external APIs
 aiohttp
 httpx
+certifi
 
 # Authentication and security
 python-jose[cryptography]
@@ -33,7 +34,7 @@ pydub
 
 # AI and ML
 openai
-groq
+elevenlabs
 
 # Background tasks
 celery

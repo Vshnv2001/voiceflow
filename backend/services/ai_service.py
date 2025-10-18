@@ -1,19 +1,19 @@
 """
-AI service for generating responses using Groq/LLM providers
+AI service for generating responses using OpenAI/LLM providers
 """
 
 import asyncio
-import aiohttp
 import os
 import json
 from typing import Optional, Dict, Any, List, AsyncGenerator
 from datetime import datetime
+from openai import AsyncOpenAI
 
 class AIService:
     def __init__(self):
-        self.groq_api_key = os.getenv("GROQ_API_KEY")
-        self.groq_base_url = "https://api.groq.com/openai/v1"
-        self.default_model = "llama-3.1-70b-versatile"
+        self.openai_api_key = os.getenv("OPENAI_API_KEY")
+        self.client = AsyncOpenAI(api_key=self.openai_api_key)
+        self.default_model = "gpt-4o-mini"  # More cost-effective than gpt-4
         self.max_tokens = 1000
         self.temperature = 0.7
         
@@ -25,7 +25,7 @@ class AIService:
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None
     ) -> str:
-        """Generate AI response using Groq API"""
+        """Generate AI response using OpenAI API"""
         try:
             model = model or self.default_model
             temperature = temperature or self.temperature
@@ -37,37 +37,24 @@ class AIService:
             # Build the prompt
             prompt = self._build_prompt(user_message, context)
             
-            async with aiohttp.ClientSession() as session:
-                url = f"{self.groq_base_url}/chat/completions"
-                headers = {
-                    "Authorization": f"Bearer {self.groq_api_key}",
-                    "Content-Type": "application/json"
-                }
-                
-                data = {
-                    "model": model,
-                    "messages": [
-                        {
-                            "role": "system",
-                            "content": self._get_system_prompt()
-                        },
-                        {
-                            "role": "user",
-                            "content": prompt
-                        }
-                    ],
-                    "temperature": temperature,
-                    "max_tokens": max_tokens,
-                    "stream": False
-                }
-                
-                async with session.post(url, json=data, headers=headers) as response:
-                    if response.status == 200:
-                        result = await response.json()
-                        return result["choices"][0]["message"]["content"]
-                    else:
-                        error_text = await response.text()
-                        raise Exception(f"Groq API error: {error_text}")
+            # Use OpenAI client
+            response = await self.client.chat.completions.create(
+                model=model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": self._get_system_prompt()
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+                temperature=temperature,
+                max_tokens=max_tokens
+            )
+            
+            return response.choices[0].message.content
                         
         except Exception as e:
             print(f"Error generating AI response: {e}")
@@ -125,44 +112,21 @@ Remember: You're representing a voice AI company, so be knowledgeable about AI, 
             context = await self._get_conversation_context(session_id)
             prompt = self._build_prompt(user_message, context)
             
-            async with aiohttp.ClientSession() as session:
-                url = f"{self.groq_base_url}/chat/completions"
-                headers = {
-                    "Authorization": f"Bearer {self.groq_api_key}",
-                    "Content-Type": "application/json"
-                }
-                
-                data = {
-                    "model": model,
-                    "messages": [
-                        {"role": "system", "content": self._get_system_prompt()},
-                        {"role": "user", "content": prompt}
-                    ],
-                    "temperature": self.temperature,
-                    "max_tokens": self.max_tokens,
-                    "stream": True
-                }
-                
-                async with session.post(url, json=data, headers=headers) as response:
-                    if response.status == 200:
-                        async for line in response.content:
-                            if line:
-                                line_str = line.decode('utf-8').strip()
-                                if line_str.startswith('data: '):
-                                    data_str = line_str[6:]
-                                    if data_str == '[DONE]':
-                                        break
-                                    try:
-                                        data = json.loads(data_str)
-                                        if 'choices' in data and len(data['choices']) > 0:
-                                            delta = data['choices'][0].get('delta', {})
-                                            if 'content' in delta:
-                                                yield delta['content']
-                                    except json.JSONDecodeError:
-                                        continue
-                    else:
-                        error_text = await response.text()
-                        yield f"Error: {error_text}"
+            # Use OpenAI streaming
+            stream = await self.client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": self._get_system_prompt()},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+                stream=True
+            )
+            
+            async for chunk in stream:
+                if chunk.choices[0].delta.content is not None:
+                    yield chunk.choices[0].delta.content
                         
         except Exception as e:
             yield f"Error generating response: {str(e)}"
@@ -170,39 +134,27 @@ Remember: You're representing a voice AI company, so be knowledgeable about AI, 
     async def analyze_sentiment(self, text: str) -> Dict[str, Any]:
         """Analyze sentiment of customer message"""
         try:
-            async with aiohttp.ClientSession() as session:
-                url = f"{self.groq_base_url}/chat/completions"
-                headers = {
-                    "Authorization": f"Bearer {self.groq_api_key}",
-                    "Content-Type": "application/json"
-                }
-                
-                data = {
-                    "model": self.default_model,
-                    "messages": [
-                        {
-                            "role": "system",
-                            "content": "Analyze the sentiment of the following customer message. Respond with a JSON object containing: sentiment (positive/negative/neutral), confidence (0-1), and urgency (low/medium/high)."
-                        },
-                        {
-                            "role": "user",
-                            "content": text
-                        }
-                    ],
-                    "temperature": 0.3,
-                    "max_tokens": 100
-                }
-                
-                async with session.post(url, json=data, headers=headers) as response:
-                    if response.status == 200:
-                        result = await response.json()
-                        response_text = result["choices"][0]["message"]["content"]
-                        try:
-                            return json.loads(response_text)
-                        except json.JSONDecodeError:
-                            return {"sentiment": "neutral", "confidence": 0.5, "urgency": "medium"}
-                    else:
-                        return {"sentiment": "neutral", "confidence": 0.5, "urgency": "medium"}
+            response = await self.client.chat.completions.create(
+                model=self.default_model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "Analyze the sentiment of the following customer message. Respond with a JSON object containing: sentiment (positive/negative/neutral), confidence (0-1), and urgency (low/medium/high)."
+                    },
+                    {
+                        "role": "user",
+                        "content": text
+                    }
+                ],
+                temperature=0.3,
+                max_tokens=100
+            )
+            
+            response_text = response.choices[0].message.content
+            try:
+                return json.loads(response_text)
+            except json.JSONDecodeError:
+                return {"sentiment": "neutral", "confidence": 0.5, "urgency": "medium"}
                         
         except Exception as e:
             print(f"Error analyzing sentiment: {e}")
@@ -231,36 +183,24 @@ Remember: You're representing a voice AI company, so be knowledgeable about AI, 
     async def extract_keywords(self, text: str) -> List[str]:
         """Extract keywords from customer message for categorization"""
         try:
-            async with aiohttp.ClientSession() as session:
-                url = f"{self.groq_base_url}/chat/completions"
-                headers = {
-                    "Authorization": f"Bearer {self.groq_api_key}",
-                    "Content-Type": "application/json"
-                }
-                
-                data = {
-                    "model": self.default_model,
-                    "messages": [
-                        {
-                            "role": "system",
-                            "content": "Extract the main keywords from the following customer message. Return them as a comma-separated list."
-                        },
-                        {
-                            "role": "user",
-                            "content": text
-                        }
-                    ],
-                    "temperature": 0.3,
-                    "max_tokens": 50
-                }
-                
-                async with session.post(url, json=data, headers=headers) as response:
-                    if response.status == 200:
-                        result = await response.json()
-                        keywords_text = result["choices"][0]["message"]["content"]
-                        return [kw.strip() for kw in keywords_text.split(",")]
-                    else:
-                        return []
+            response = await self.client.chat.completions.create(
+                model=self.default_model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "Extract the main keywords from the following customer message. Return them as a comma-separated list."
+                    },
+                    {
+                        "role": "user",
+                        "content": text
+                    }
+                ],
+                temperature=0.3,
+                max_tokens=50
+            )
+            
+            keywords_text = response.choices[0].message.content
+            return [kw.strip() for kw in keywords_text.split(",")]
                         
         except Exception as e:
             print(f"Error extracting keywords: {e}")

@@ -103,7 +103,6 @@ docker-compose up --build
 | `SUPABASE_ANON_KEY` | Supabase anonymous key | `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...` |
 | `SUPABASE_SERVICE_ROLE_KEY` | Supabase service role key | `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...` |
 | `OPENAI_API_KEY` | OpenAI API key | `sk-...` |
-| `GROQ_API_KEY` | Groq API key | `gsk_...` |
 | `ELEVENLABS_API_KEY` | ElevenLabs API key | `sk_...` |
 | `JWT_SECRET_KEY` | JWT signing secret | `your-super-secret-key` |
 

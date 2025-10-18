@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS messages (
     text_content TEXT,
     
     -- AI generation fields
-    ai_model TEXT, -- e.g., 'groq/llama-3.1-70b-versatile'
+    ai_model TEXT, -- e.g., 'gpt-4o-mini'
     ai_prompt TEXT, -- The prompt used for generation
     ai_temperature DECIMAL(3,2) DEFAULT 0.7,
     
@@ -225,9 +225,9 @@ CREATE TRIGGER update_available_voices_updated_at
 -- Insert default system configuration
 INSERT INTO system_config (key, value, description, is_encrypted) VALUES
 ('elevenlabs_api_key', '', 'ElevenLabs API key for voice synthesis', true),
-('groq_api_key', '', 'Groq API key for LLM responses', true),
+('openai_api_key', '', 'OpenAI API key for LLM responses', true),
 ('default_voice_id', 'pNInz6obpgDQGcFmaJgB', 'Default ElevenLabs voice ID (Adam)', false),
-('ai_model', 'groq/llama-3.1-70b-versatile', 'Default AI model for responses', false),
+('ai_model', 'gpt-4o-mini', 'Default AI model for responses', false),
 ('ai_temperature', '0.7', 'Default AI temperature setting', false),
 ('max_voice_duration', '300', 'Maximum voice message duration in seconds', false)
 ON CONFLICT (key) DO NOTHING;
