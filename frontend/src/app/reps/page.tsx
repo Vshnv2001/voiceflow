@@ -44,7 +44,6 @@ export default function RepsPage() {
       const { data, error } = await supabase
         .from("reps")
         .select("*")
-        .eq("status", "active")
         .order("calls_handled", { ascending: false })
 
       if (error) {
@@ -52,6 +51,8 @@ export default function RepsPage() {
         setError("Failed to load representatives")
         return
       }
+
+      console.log("Reps data:", data)
 
       setReps(data || [])
     } catch (err) {
