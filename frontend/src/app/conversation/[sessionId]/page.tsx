@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useRef } from "react"
 import { useParams, useRouter } from "next/navigation"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
@@ -9,7 +9,7 @@ import { Avatar } from "@/components/ui/avatar"
 import { 
   Phone, PhoneOff, Mic, MicOff, Volume2, VolumeX, 
   User, Clock, ArrowLeft, Settings, MessageCircle,
-  Video, VideoOff, MoreVertical
+  Video, VideoOff, MoreVertical, Loader2
 } from "lucide-react"
 import Navigation from "@/components/Navigation"
 import { useSessionStatus } from "@/hooks/useSessionStatus"
@@ -37,6 +37,15 @@ export default function ConversationPage() {
   const [isSpeakerOn, setIsSpeakerOn] = useState(true)
   const [isVideoOn, setIsVideoOn] = useState(false)
   const [callDuration, setCallDuration] = useState(0)
+  
+  // WebSocket and audio
+  const [isConnected, setIsConnected] = useState(false)
+  const [isProcessing, setIsProcessing] = useState(false)
+  const [statusMessage, setStatusMessage] = useState("")
+  const wsRef = useRef<WebSocket | null>(null)
+  const audioContextRef = useRef<AudioContext | null>(null)
+  const processorRef = useRef<ScriptProcessorNode | null>(null)
+  const streamRef = useRef<MediaStream | null>(null)
 
   useEffect(() => {
     if (session && session.customer_rep_id) {
@@ -84,6 +93,165 @@ export default function ConversationPage() {
     }
   }
 
+  // Connect to WebSocket and start audio streaming
+  const connectWebSocket = async () => {
+    try {
+      // Request microphone permission
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          sampleRate: 16000,
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        }
+      })
+      
+      streamRef.current = stream
+      setStatusMessage("Microphone access granted")
+      
+      // Connect to WebSocket
+      const wsUrl = `ws://localhost:8000/ws/audio/${sessionId}`
+      const ws = new WebSocket(wsUrl)
+      wsRef.current = ws
+      
+      ws.onopen = () => {
+        console.log("WebSocket connected")
+        setIsConnected(true)
+        setStatusMessage("Connected - Speak now!")
+        startAudioCapture(stream, ws)
+      }
+      
+      ws.onmessage = async (event) => {
+        if (event.data instanceof Blob) {
+          // Received audio response
+          console.log("Received audio response")
+          setStatusMessage("Playing response...")
+          await playAudioBlob(event.data)
+          setIsProcessing(false)
+          setStatusMessage("Ready - Speak again!")
+        } else {
+          // Received JSON message
+          const message = JSON.parse(event.data)
+          console.log("WebSocket message:", message)
+          
+          if (message.status === "processing") {
+            setIsProcessing(true)
+            setStatusMessage(message.message || "Processing your audio...")
+          } else if (message.status === "complete") {
+            setStatusMessage("Response received!")
+            console.log("Transcript:", message.transcript)
+            console.log("Response:", message.response_text)
+          } else if (message.status === "error" || message.error) {
+            setStatusMessage(`Error: ${message.error}`)
+            setIsProcessing(false)
+          }
+        }
+      }
+      
+      ws.onerror = (error) => {
+        console.error("WebSocket error:", error)
+        setStatusMessage("Connection error")
+        setIsConnected(false)
+      }
+      
+      ws.onclose = () => {
+        console.log("WebSocket disconnected")
+        setIsConnected(false)
+        setStatusMessage("Disconnected")
+        stopAudioCapture()
+      }
+      
+    } catch (error) {
+      console.error("Error connecting:", error)
+      setStatusMessage(`Error: ${error instanceof Error ? error.message : 'Failed to connect'}`)
+    }
+  }
+  
+  // Start capturing audio from microphone
+  const startAudioCapture = (stream: MediaStream, ws: WebSocket) => {
+    const audioContext = new AudioContext({ sampleRate: 16000 })
+    audioContextRef.current = audioContext
+    
+    const source = audioContext.createMediaStreamSource(stream)
+    const processor = audioContext.createScriptProcessor(4096, 1, 1)
+    processorRef.current = processor
+    
+    source.connect(processor)
+    processor.connect(audioContext.destination)
+    
+    processor.onaudioprocess = (e) => {
+      if (ws.readyState === WebSocket.OPEN && !isMuted) {
+        const inputData = e.inputBuffer.getChannelData(0)
+        
+        // Convert float32 to int16
+        const int16Data = new Int16Array(inputData.length)
+        for (let i = 0; i < inputData.length; i++) {
+          const s = Math.max(-1, Math.min(1, inputData[i]))
+          int16Data[i] = s < 0 ? s * 0x8000 : s * 0x7FFF
+        }
+        
+        // Send to WebSocket
+        ws.send(int16Data.buffer)
+      }
+    }
+  }
+  
+  // Stop audio capture
+  const stopAudioCapture = () => {
+    if (processorRef.current) {
+      processorRef.current.disconnect()
+      processorRef.current = null
+    }
+    
+    if (audioContextRef.current) {
+      audioContextRef.current.close()
+      audioContextRef.current = null
+    }
+    
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(track => track.stop())
+      streamRef.current = null
+    }
+  }
+  
+  // Play audio blob
+  const playAudioBlob = async (blob: Blob) => {
+    const audioUrl = URL.createObjectURL(blob)
+    const audio = new Audio(audioUrl)
+    
+    return new Promise<void>((resolve) => {
+      audio.onended = () => {
+        URL.revokeObjectURL(audioUrl)
+        resolve()
+      }
+      audio.play().catch(err => {
+        console.error("Error playing audio:", err)
+        resolve()
+      })
+    })
+  }
+  
+  // Disconnect WebSocket
+  const disconnectWebSocket = () => {
+    if (wsRef.current) {
+      wsRef.current.close()
+      wsRef.current = null
+    }
+    stopAudioCapture()
+    setIsConnected(false)
+    setStatusMessage("")
+  }
+  
+  // Connect once when session becomes active
+  useEffect(() => {
+    if (session?.status === 'active' && !isConnected && !wsRef.current) {
+      console.log('Session is active, connecting to WebSocket...')
+      connectWebSocket()
+    }
+    // Don't disconnect on unmount - only disconnect via End Call button
+  }, [session?.status])
+
   const formatDuration = (seconds: number) => {
     const mins = Math.floor(seconds / 60)
     const secs = seconds % 60
@@ -91,24 +259,22 @@ export default function ConversationPage() {
   }
 
   const handleEndCall = () => {
-    // TODO: Implement call ending logic
+    disconnectWebSocket()
     console.log('Ending call...')
     router.push('/reps')
   }
 
   const toggleMute = () => {
     setIsMuted(!isMuted)
-    // TODO: Implement actual mute logic
+    setStatusMessage(isMuted ? "Microphone unmuted" : "Microphone muted")
   }
 
   const toggleSpeaker = () => {
     setIsSpeakerOn(!isSpeakerOn)
-    // TODO: Implement actual speaker logic
   }
 
   const toggleVideo = () => {
     setIsVideoOn(!isVideoOn)
-    // TODO: Implement actual video logic
   }
 
   if (sessionLoading || loading) {
@@ -215,12 +381,22 @@ export default function ConversationPage() {
                     </div>
                   </div>
 
-                  {/* Video indicator (when enabled) */}
+                  {/* Status indicators */}
                   {isVideoOn && (
                     <Badge className="absolute top-4 right-4 bg-green-500">
                       <Video className="h-3 w-3 mr-1" />
                       Video On
                     </Badge>
+                  )}
+                  
+                  {/* WebSocket Status */}
+                  {statusMessage && (
+                    <div className="absolute bottom-4 left-1/2 transform -translate-x-1/2 w-full px-4">
+                      <div className="bg-background/90 backdrop-blur-sm border rounded-lg px-4 py-2 text-sm font-medium text-center shadow-lg">
+                        {isProcessing && <Loader2 className="h-4 w-4 animate-spin inline mr-2" />}
+                        {statusMessage}
+                      </div>
+                    </div>
                   )}
                 </div>
 
@@ -316,6 +492,16 @@ export default function ConversationPage() {
                   <Badge className="bg-green-100 text-green-800 border-green-200">
                     {session.status}
                   </Badge>
+                </div>
+                
+                <div>
+                  <p className="text-sm text-muted-foreground mb-1">Audio Connection</p>
+                  <div className="flex items-center gap-2">
+                    <div className={`h-2 w-2 rounded-full ${isConnected ? 'bg-green-500 animate-pulse' : 'bg-gray-300'}`}></div>
+                    <span className="text-sm font-medium">
+                      {isConnected ? 'Connected' : 'Not Connected'}
+                    </span>
+                  </div>
                 </div>
                 
                 <div>
