@@ -817,10 +817,10 @@ async def websocket_agent_connection(websocket: WebSocket, session_id: str):
                     
             except WebSocketDisconnect:
                 logger.info(f"Agent disconnected for session: {session_id}")
-                break
-            except Exception as e:
-                logger.error(f"Error in agent WebSocket: {e}")
-                break
+                return
+    except Exception as e:
+        logger.error(f"Error in agent WebSocket: {e}")
+        return
     
     finally:
         # Unregister agent connection
@@ -833,8 +833,10 @@ async def send_agent_response(session_id: str, request: dict = Body(...)):
     API endpoint for agent to approve and send a response to the customer.
     
     When called, this will:
-    1. Save the approved text to the database (transcripts)
-    2. Stream the buffered audio to the customer
+    1. Compare approved text with original suggested text
+    2. If text is unchanged: Stream original buffered audio
+    3. If text was edited: Generate new audio via ElevenLabs TTS API
+    4. Save the approved text to database (transcripts)
     
     Request Body:
         {
@@ -855,23 +857,39 @@ async def send_agent_response(session_id: str, request: dict = Body(...)):
         
         logger.info(f"Agent approving response for session {session_id}: {approved_text[:50]}...")
         
-        # First, save the approved text to database
+        # Get original suggested text
+        original_text = await agent_control_manager.get_original_text(session_id)
+        
+        # Compare texts to determine if we need to regenerate audio
+        text_was_modified = (original_text != approved_text)
+        
+        if text_was_modified:
+            logger.info(f"🔄 Text was modified. Generating new audio via TTS API...")
+            logger.info(f"   Original: {original_text[:50]}...")
+            logger.info(f"   Modified: {approved_text[:50]}...")
+            
+            # Generate new audio using ElevenLabs TTS API
+            success = await generate_and_stream_tts_audio(session_id, approved_text)
+        elif approved_text:
+            logger.info(f"✅ Text unchanged. Streaming original buffered audio...")
+            # Stream the original buffered audio
+            success = await agent_control_manager.approve_and_send_response(session_id, approved_text)
+            
+        if not success:
+            raise HTTPException(status_code=404, detail="No pending response or customer not connected")
+            
+        # Save the approved text to database (after audio generation)
         try:
             await db_service.append_transcript(session_id, 'agent', approved_text)
             logger.info(f"✅ Saved approved response to database")
         except Exception as e:
             logger.error(f"Error saving transcript: {e}")
-            # Continue anyway - audio should still play
-        
-        # Send the buffered audio to customer
-        success = await agent_control_manager.approve_and_send_response(session_id, approved_text)
-        
-        if not success:
-            raise HTTPException(status_code=404, detail="No pending response or customer not connected")
+            # Continue anyway - audio was already sent
         
         return {
             "success": True,
-            "message": "Response sent to customer"
+            "message": "Response sent to customer",
+            "text_was_modified": text_was_modified
         }
         
     except HTTPException:
@@ -879,6 +897,89 @@ async def send_agent_response(session_id: str, request: dict = Body(...)):
     except Exception as e:
         logger.error(f"Error sending agent response: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+async def generate_and_stream_tts_audio(session_id: str, text: str) -> bool:
+    """
+    Generate audio using ElevenLabs TTS API, convert to WAV format, and send to customer.
+    
+    Args:
+        session_id: The session ID
+        text: The text to convert to speech
+        
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    try:
+        import httpx
+        import base64
+        import struct
+        import io
+        
+        # Get customer WebSocket connection
+        customer_ws = agent_control_manager.customer_connections.get(session_id)
+        if not customer_ws:
+            logger.error(f"No customer connection for session {session_id}")
+            return False
+        
+        # Use the same voice as the agent
+        voice_id = "goT3UYdM9bhm0n2lmKQx"  # Default voice - Rachel
+        
+        # ElevenLabs TTS API endpoint
+        url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+        
+        headers = {
+            "xi-api-key": elevenlabs_api_key,
+            "Content-Type": "application/json"
+        }
+        
+        # Use MP3 format for better quality and smaller size
+        payload = {
+            "text": text,
+            "model_id": "eleven_flash_v2_5",
+            "output_format": "mp3_44100_128",  # MP3 format
+            "voice_settings": {
+                "stability": 0.6,
+                "similarity_boost": 0.8,
+                "style": 0.0,
+                "use_speaker_boost": True
+            }
+        }
+        
+        logger.info(f"🎤 Calling ElevenLabs TTS API for session {session_id}...")
+        logger.info(f"   Text: {text[:100]}...")
+        
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(url, json=payload, headers=headers)
+            
+            if response.status_code != 200:
+                error_text = response.text
+                logger.error(f"TTS API error: {response.status_code} - {error_text}")
+                return False
+            
+            # Get complete MP3 audio data
+            audio_data = response.content
+            logger.info(f"✅ Received {len(audio_data)} bytes of MP3 audio from TTS API")
+            
+            # Send as a single base64-encoded MP3
+            # The frontend will need to handle MP3 playback
+            audio_base64 = base64.b64encode(audio_data).decode('utf-8')
+            
+            # Send the complete audio in one message with a special type
+            await customer_ws.send_json({
+                'type': 'audio_complete',
+                'audio_data': audio_base64,
+                'format': 'mp3'
+            })
+            
+            logger.info(f"✅ Sent complete MP3 audio to customer ({len(audio_data)} bytes)")
+            return True
+                
+    except Exception as e:
+        logger.error(f"Error generating TTS audio: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return False
 
 # ==================== HEALTH CHECK ====================
 
