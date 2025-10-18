@@ -71,7 +71,7 @@ async def create_session(
     """Create a new customer service session"""
     try:
         session = await db_service.create_session(
-            user_id=current_user["id"],
+            customer_rep_id=current_user["id"],
             customer_id=session_data.customer_id,
             metadata=session_data.metadata
         )
@@ -99,10 +99,10 @@ async def get_sessions(
     offset: int = 0,
     current_user: dict = Depends(get_current_user)
 ):
-    """Get user's sessions with optional filtering"""
+    """Get customer rep's sessions with optional filtering"""
     try:
         sessions = await db_service.get_sessions(
-            user_id=current_user["id"],
+            customer_rep_id=current_user["id"],
             status=status,
             limit=limit,
             offset=offset
@@ -607,8 +607,8 @@ async def process_ai_response_generation(message_id: str):
         if not message or not message.voice_transcription:
             return
         
-        # Get the session to get user_id for RAG
-        session = await db_service.get_session(message.session_id, None)  # No user_id check for background task
+        # Get the session to get customer_rep_id for RAG
+        session = await db_service.get_session(message.session_id, None)  # No customer_rep_id check for background task
         if not session:
             return
         
@@ -617,7 +617,7 @@ async def process_ai_response_generation(message_id: str):
             user_message=message.voice_transcription,
             session_id=message.session_id,
             use_rag=True,
-            user_id=session["user_id"]
+            user_id=session["customer_rep_id"]
         )
         
         # Select appropriate voice for the response

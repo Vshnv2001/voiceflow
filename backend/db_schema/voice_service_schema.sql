@@ -4,8 +4,8 @@
 -- 1. Sessions table - tracks customer service conversations
 CREATE TABLE IF NOT EXISTS sessions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
-    customer_id UUID, -- Optional: if different from user_id (for agent view)
+    customer_rep_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+    customer_id UUID, -- Optional: if different from customer_rep_id (for agent view)
     status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'closed', 'paused')),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
@@ -104,7 +104,7 @@ CREATE TABLE IF NOT EXISTS available_voices (
 );
 
 -- Create indexes for better performance
-CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_customer_rep_id ON sessions(customer_rep_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status);
 CREATE INDEX IF NOT EXISTS idx_sessions_created_at ON sessions(created_at);
 
@@ -135,26 +135,26 @@ ALTER TABLE available_voices ENABLE ROW LEVEL SECURITY;
 
 -- RLS Policies for sessions
 CREATE POLICY "Users can view their own sessions" ON sessions
-    FOR SELECT USING (auth.uid() = user_id);
+    FOR SELECT USING (auth.uid() = customer_rep_id);
 
 CREATE POLICY "Users can create their own sessions" ON sessions
-    FOR INSERT WITH CHECK (auth.uid() = user_id);
+    FOR INSERT WITH CHECK (auth.uid() = customer_rep_id);
 
 CREATE POLICY "Users can update their own sessions" ON sessions
-    FOR UPDATE USING (auth.uid() = user_id);
+    FOR UPDATE USING (auth.uid() = customer_rep_id);
 
 -- RLS Policies for messages
 CREATE POLICY "Users can view messages in their sessions" ON messages
     FOR SELECT USING (
         session_id IN (
-            SELECT id FROM sessions WHERE user_id = auth.uid()
+            SELECT id FROM sessions WHERE customer_rep_id = auth.uid()
         )
     );
 
 CREATE POLICY "Users can create messages in their sessions" ON messages
     FOR INSERT WITH CHECK (
         session_id IN (
-            SELECT id FROM sessions WHERE user_id = auth.uid()
+            SELECT id FROM sessions WHERE customer_rep_id = auth.uid()
         )
     );
 
@@ -164,7 +164,7 @@ CREATE POLICY "Users can view voice jobs for their messages" ON voice_processing
         message_id IN (
             SELECT m.id FROM messages m
             JOIN sessions s ON m.session_id = s.id
-            WHERE s.user_id = auth.uid()
+            WHERE s.customer_rep_id = auth.uid()
         )
     );
 
@@ -174,7 +174,7 @@ CREATE POLICY "Users can view agent responses for their messages" ON agent_respo
         message_id IN (
             SELECT m.id FROM messages m
             JOIN sessions s ON m.session_id = s.id
-            WHERE s.user_id = auth.uid()
+            WHERE s.customer_rep_id = auth.uid()
         )
     );
 

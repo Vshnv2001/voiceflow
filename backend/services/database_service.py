@@ -20,14 +20,14 @@ class DatabaseService:
     
     async def create_session(
         self, 
-        user_id: str, 
+        customer_rep_id: str, 
         customer_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """Create a new session"""
         try:
             data = {
-                "user_id": user_id,
+                "customer_rep_id": customer_rep_id,
                 "customer_id": customer_id,
                 "status": "active",
                 "metadata": metadata or {}
@@ -40,10 +40,10 @@ class DatabaseService:
             print(f"Error creating session: {e}")
             raise Exception(f"Failed to create session: {str(e)}")
     
-    async def get_session(self, session_id: str, user_id: str) -> Optional[Dict[str, Any]]:
+    async def get_session(self, session_id: str, customer_rep_id: str) -> Optional[Dict[str, Any]]:
         """Get a session by ID"""
         try:
-            result = self.supabase.table("sessions").select("*").eq("id", session_id).eq("user_id", user_id).execute()
+            result = self.supabase.table("sessions").select("*").eq("id", session_id).eq("customer_rep_id", customer_rep_id).execute()
             return result.data[0] if result.data else None
             
         except Exception as e:
@@ -52,14 +52,14 @@ class DatabaseService:
     
     async def get_sessions(
         self, 
-        user_id: str, 
+        customer_rep_id: str, 
         status: Optional[str] = None,
         limit: int = 50,
         offset: int = 0
     ) -> List[Dict[str, Any]]:
-        """Get user's sessions with optional filtering"""
+        """Get customer rep's sessions with optional filtering"""
         try:
-            query = self.supabase.table("sessions").select("*").eq("user_id", user_id)
+            query = self.supabase.table("sessions").select("*").eq("customer_rep_id", customer_rep_id)
             
             if status:
                 query = query.eq("status", status)
@@ -74,22 +74,22 @@ class DatabaseService:
     async def update_session(
         self, 
         session_id: str, 
-        user_id: str, 
+        customer_rep_id: str, 
         **updates
     ) -> bool:
         """Update a session"""
         try:
-            result = self.supabase.table("sessions").update(updates).eq("id", session_id).eq("user_id", user_id).execute()
+            result = self.supabase.table("sessions").update(updates).eq("id", session_id).eq("customer_rep_id", customer_rep_id).execute()
             return len(result.data) > 0
             
         except Exception as e:
             print(f"Error updating session: {e}")
             return False
         
-    async def close_session(self, session_id: str, user_id: str) -> bool:
+    async def close_session(self, session_id: str, customer_rep_id: str) -> bool:
         """Close a session"""
         try:
-            result = self.supabase.table("sessions").update({"status": "closed"}).eq("id", session_id).eq("user_id", user_id).execute()
+            result = self.supabase.table("sessions").update({"status": "closed"}).eq("id", session_id).eq("customer_rep_id", customer_rep_id).execute()
             return len(result.data) > 0
         except Exception as e:
             print(f"Error closing session: {e}")
@@ -236,15 +236,15 @@ class DatabaseService:
             print(f"Error creating voice job: {e}")
             raise Exception(f"Failed to create voice job: {str(e)}")
     
-    async def get_voice_job(self, job_id: str, user_id: str) -> Optional[Dict[str, Any]]:
+    async def get_voice_job(self, job_id: str, customer_rep_id: str) -> Optional[Dict[str, Any]]:
         """Get a voice processing job"""
         try:
             result = self.supabase.table("voice_processing_jobs").select("*, messages(sessions(*))").eq("id", job_id).execute()
             
             if result.data:
-                # Check if user has access to this job
+                # Check if customer rep has access to this job
                 job = result.data[0]
-                if job["messages"]["sessions"]["user_id"] == user_id:
+                if job["messages"]["sessions"]["customer_rep_id"] == customer_rep_id:
                     return job
             
             return None
@@ -384,13 +384,13 @@ class DatabaseService:
     
     async def get_session_analytics(
         self, 
-        user_id: str,
+        customer_rep_id: str,
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None
     ) -> Dict[str, Any]:
-        """Get analytics for user sessions"""
+        """Get analytics for customer rep sessions"""
         try:
-            query = self.supabase.table("sessions").select("*").eq("user_id", user_id)
+            query = self.supabase.table("sessions").select("*").eq("customer_rep_id", customer_rep_id)
             
             if start_date:
                 query = query.gte("created_at", start_date.isoformat())

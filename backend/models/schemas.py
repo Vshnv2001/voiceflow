@@ -46,7 +46,7 @@ class SessionCreate(BaseModel):
 
 class SessionResponse(BaseModel):
     id: str
-    user_id: str
+    customer_rep_id: str
     customer_id: Optional[str]
     status: SessionStatus
     created_at: datetime
