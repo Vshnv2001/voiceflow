@@ -23,6 +23,9 @@ interface Rep {
   status: string
 }
 
+// Add after imports, before the interface
+const ELEVENLABS_AGENT_ID = 'agent_4901k7vt2tdffjw9qrkhk4by8ecp' // Replace with your agent ID
+
 export default function ConversationPage() {
   const params = useParams()
   const router = useRouter()
@@ -46,6 +49,8 @@ export default function ConversationPage() {
   const audioContextRef = useRef<AudioContext | null>(null)
   const processorRef = useRef<ScriptProcessorNode | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
+  const isPlayingAudioRef = useRef(false)
+  const audioQueueRef = useRef<string[]>([])
 
   useEffect(() => {
     if (session && session.customer_rep_id) {
@@ -93,7 +98,7 @@ export default function ConversationPage() {
     }
   }
 
-  // Connect to WebSocket and start audio streaming
+  // Connect to ElevenLabs WebSocket directly
   const connectWebSocket = async () => {
     try {
       // Request microphone permission
@@ -110,65 +115,120 @@ export default function ConversationPage() {
       streamRef.current = stream
       setStatusMessage("Microphone access granted")
       
-      // Connect to WebSocket
-      const wsUrl = `ws://localhost:8000/ws/audio/${sessionId}`
+      // Connect directly to ElevenLabs API
+      const wsUrl = `wss://api.elevenlabs.io/v1/convai/conversation?agent_id=${ELEVENLABS_AGENT_ID}`
       const ws = new WebSocket(wsUrl)
       wsRef.current = ws
       
       ws.onopen = () => {
-        console.log("WebSocket connected")
+        console.log("Connected to ElevenLabs WebSocket")
         setIsConnected(true)
-        setStatusMessage("Connected - Speak now!")
-        startAudioCapture(stream, ws)
+        setStatusMessage("Connected to ElevenLabs")
+        
+        // Send conversation initiation (without prompt override since agent doesn't allow it)
+        const initMessage = {
+          type: "conversation_initiation_client_data",
+          conversation_config_override: {
+            agent: {
+              language: "en"
+            }
+          }
+        }
+        
+        ws.send(JSON.stringify(initMessage))
+        console.log("Sent conversation initiation")
+        setStatusMessage("Ready - Speak now!")
       }
       
       ws.onmessage = async (event) => {
-        if (event.data instanceof Blob) {
-          // Received audio response
-          console.log("Received audio response")
-          setStatusMessage("Playing response...")
-          await playAudioBlob(event.data)
-          setIsProcessing(false)
-          setStatusMessage("Ready - Speak again!")
-        } else {
-          // Received JSON message
+        try {
+          // ElevenLabs sends JSON messages
           const message = JSON.parse(event.data)
-          console.log("WebSocket message:", message)
+          const messageType = message.type || ''
           
-          if (message.status === "processing") {
-            setIsProcessing(true)
-            setStatusMessage(message.message || "Processing your audio...")
-          } else if (message.status === "complete") {
-            setStatusMessage("Response received!")
-            console.log("Transcript:", message.transcript)
-            console.log("Response:", message.response_text)
-          } else if (message.status === "error" || message.error) {
-            setStatusMessage(`Error: ${message.error}`)
-            setIsProcessing(false)
+          console.log("ElevenLabs message:", messageType, message)
+          
+          switch (messageType) {
+            case 'conversation_initiation_metadata':
+              console.log("Conversation initialized:", message)
+              setStatusMessage("Ready - Start speaking!")
+              startAudioCapture(stream, ws)
+              break
+              
+            case 'audio':
+              // Handle audio response from ElevenLabs
+              const audioEvent = message.audio_event
+              if (audioEvent && audioEvent.audio_base_64) {
+                console.log("Received audio chunk from ElevenLabs")
+                
+                // Add to queue
+                audioQueueRef.current.push(audioEvent.audio_base_64)
+                
+                // Process queue if not already playing
+                if (!isPlayingAudioRef.current) {
+                  processAudioQueue()
+                }
+              }
+              break
+              
+            case 'user_transcript':
+              // Handle user transcript
+              const userTranscript = message.user_transcription_event?.user_transcript
+              if (userTranscript) {
+                console.log("User said:", userTranscript)
+                setStatusMessage(`You: ${userTranscript}`)
+              }
+              break
+              
+            case 'agent_response':
+              // Handle agent text response
+              const agentResponse = message.agent_response_event?.agent_response
+              if (agentResponse) {
+                console.log("Agent response:", agentResponse)
+                setIsProcessing(true)
+              }
+              break
+              
+            case 'ping':
+              // Respond to ping with pong
+              const pingEvent = message.ping_event
+              if (pingEvent) {
+                ws.send(JSON.stringify({
+                  type: 'pong',
+                  event_id: pingEvent.event_id
+                }))
+              }
+              break
+              
+            default:
+              console.log("Unhandled message type:", messageType)
           }
+          
+        } catch (error) {
+          console.error("Error handling ElevenLabs message:", error)
         }
       }
       
       ws.onerror = (error) => {
-        console.error("WebSocket error:", error)
+        console.error("ElevenLabs WebSocket error:", error)
         setStatusMessage("Connection error")
         setIsConnected(false)
       }
       
-      ws.onclose = () => {
-        console.log("WebSocket disconnected")
+      ws.onclose = (event) => {
+        console.log("ElevenLabs WebSocket closed:", event.code, event.reason)
         setIsConnected(false)
         setStatusMessage("Disconnected")
         stopAudioCapture()
       }
       
     } catch (error) {
-      console.error("Error connecting:", error)
+      console.error("Error connecting to ElevenLabs:", error)
       setStatusMessage(`Error: ${error instanceof Error ? error.message : 'Failed to connect'}`)
     }
   }
   
-  // Start capturing audio from microphone
+  // Start capturing audio from microphone and send to ElevenLabs
   const startAudioCapture = (stream: MediaStream, ws: WebSocket) => {
     const audioContext = new AudioContext({ sampleRate: 16000 })
     audioContextRef.current = audioContext
@@ -184,15 +244,22 @@ export default function ConversationPage() {
       if (ws.readyState === WebSocket.OPEN && !isMuted) {
         const inputData = e.inputBuffer.getChannelData(0)
         
-        // Convert float32 to int16
+        // Convert float32 to int16 PCM
         const int16Data = new Int16Array(inputData.length)
         for (let i = 0; i < inputData.length; i++) {
           const s = Math.max(-1, Math.min(1, inputData[i]))
           int16Data[i] = s < 0 ? s * 0x8000 : s * 0x7FFF
         }
         
-        // Send to WebSocket
-        ws.send(int16Data.buffer)
+        // Convert to base64 for ElevenLabs
+        const base64Audio = btoa(
+          String.fromCharCode(...new Uint8Array(int16Data.buffer))
+        )
+        
+        // Send to ElevenLabs in the correct format
+        ws.send(JSON.stringify({
+          user_audio_chunk: base64Audio
+        }))
       }
     }
   }
@@ -215,21 +282,71 @@ export default function ConversationPage() {
     }
   }
   
-  // Play audio blob
-  const playAudioBlob = async (blob: Blob) => {
-    const audioUrl = URL.createObjectURL(blob)
-    const audio = new Audio(audioUrl)
+  // Process audio queue sequentially
+  const processAudioQueue = async () => {
+    if (isPlayingAudioRef.current || audioQueueRef.current.length === 0) {
+      return
+    }
     
-    return new Promise<void>((resolve) => {
-      audio.onended = () => {
-        URL.revokeObjectURL(audioUrl)
-        resolve()
+    isPlayingAudioRef.current = true
+    setStatusMessage("Playing response...")
+    setIsProcessing(true)
+    
+    while (audioQueueRef.current.length > 0) {
+      const audioChunk = audioQueueRef.current.shift()
+      if (audioChunk) {
+        await playBase64Audio(audioChunk)
       }
-      audio.play().catch(err => {
-        console.error("Error playing audio:", err)
-        resolve()
+    }
+    
+    isPlayingAudioRef.current = false
+    setIsProcessing(false)
+    setStatusMessage("Ready - Speak again!")
+  }
+
+  // Play base64 encoded audio from ElevenLabs
+  const playBase64Audio = async (base64Audio: string) => {
+    try {
+      // Decode base64 to binary string
+      const binaryString = atob(base64Audio)
+      
+      // Convert binary string to Int16Array (PCM data)
+      const len = binaryString.length
+      const bytes = new Uint8Array(len)
+      for (let i = 0; i < len; i++) {
+        bytes[i] = binaryString.charCodeAt(i)
+      }
+      
+      // Create Int16Array from the bytes
+      const pcmData = new Int16Array(bytes.buffer)
+      
+      // Create audio context
+      const audioContext = new AudioContext({ sampleRate: 16000 })
+      
+      // Create audio buffer
+      const audioBuffer = audioContext.createBuffer(1, pcmData.length, 16000)
+      const channelData = audioBuffer.getChannelData(0)
+      
+      // Convert Int16 PCM to Float32 for Web Audio API
+      for (let i = 0; i < pcmData.length; i++) {
+        channelData[i] = pcmData[i] / 32768.0
+      }
+      
+      // Play the audio
+      const source = audioContext.createBufferSource()
+      source.buffer = audioBuffer
+      source.connect(audioContext.destination)
+      
+      return new Promise<void>((resolve) => {
+        source.onended = () => {
+          audioContext.close()
+          resolve()
+        }
+        source.start(0)
       })
-    })
+    } catch (error) {
+      console.error("Error playing audio:", error)
+    }
   }
   
   // Disconnect WebSocket
@@ -239,6 +356,11 @@ export default function ConversationPage() {
       wsRef.current = null
     }
     stopAudioCapture()
+    
+    // Clear audio queue
+    audioQueueRef.current = []
+    isPlayingAudioRef.current = false
+    
     setIsConnected(false)
     setStatusMessage("")
   }
