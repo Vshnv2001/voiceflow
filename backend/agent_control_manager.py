@@ -28,7 +28,7 @@ class AgentControlManager:
     """
     
     def __init__(self):
-        # Store pending responses: {session_id: {'text': str, 'audio_chunks': [str]}}
+        # Store pending responses: {session_id: {'text': str, 'original_text': str, 'audio_chunks': [str]}}
         self.pending_responses: Dict[str, dict] = {}
         
         # Store agent websocket connections: {session_id: WebSocket}
@@ -75,10 +75,12 @@ class AgentControlManager:
             if session_id not in self.pending_responses:
                 self.pending_responses[session_id] = {
                     'text': '',
+                    'original_text': '',
                     'audio_chunks': []
                 }
             
             self.pending_responses[session_id]['text'] = text
+            self.pending_responses[session_id]['original_text'] = text  # Store original for comparison
             logger.info(f"📝 Buffered agent response text for session {session_id}: {text[:50]}...")
         
         # Send suggestion to agent
@@ -168,6 +170,13 @@ class AgentControlManager:
         """Get the pending response for a session"""
         async with self.lock:
             return self.pending_responses.get(session_id)
+    
+    async def get_original_text(self, session_id: str) -> Optional[str]:
+        """Get the original suggested text for comparison"""
+        async with self.lock:
+            if session_id in self.pending_responses:
+                return self.pending_responses[session_id].get('original_text')
+            return None
 
 
 # Global instance
