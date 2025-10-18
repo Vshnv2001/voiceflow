@@ -75,9 +75,9 @@ export default function SignUpPage() {
         setError(error.message)
       } else {
         setSuccess(true)
-        // Redirect to dashboard after successful signup
+        // Redirect to login after successful signup
         setTimeout(() => {
-          router.push('/home')
+          router.push('/login')
         }, 2000)
       }
     } catch (err) {
@@ -112,7 +112,7 @@ export default function SignUpPage() {
             {success && (
               <div className="mb-4 flex items-center gap-2 rounded-md bg-green-500/15 p-3 text-sm text-green-700">
                 <AlertCircle className="h-4 w-4" />
-                Account created successfully! Redirecting to dashboard...
+                Account created successfully! Please check your email for a confirmation.
               </div>
             )}
             

@@ -214,8 +214,8 @@ export default function TranscriptsPage() {
                 {activeSessions.map((session) => (
                   <Card
                     key={session.id}
-                    className={`p-4 cursor-pointer transition-all hover:bg-accent/50 ${
-                      selectedCall?.id === session.id ? "bg-accent border-primary" : "bg-card/50"
+                    className={`p-4 cursor-pointer transition-all hover:bg-blue-50 dark:hover:bg-blue-950/30 ${
+                      selectedCall?.id === session.id ? "bg-blue-100 dark:bg-blue-950/50 border-primary" : "bg-card/50"
                     }`}
                     onClick={() => setSelectedCall(session)}
                   >

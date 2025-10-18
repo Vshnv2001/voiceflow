@@ -87,7 +87,8 @@ class AgentService:
         user_id: str, 
         agent_name: str,
         knowledge_base_file_ids: List[str],
-        voice_id: str = "pNInz6obpgDQGcFmaJgB",  # Default voice
+        # voice_id: str = "pNInz6obpgDQGcFmaJgB",  # Default voice
+        voice_id: str = "rNn5VdexbUXFfpfA1WcF",  # Default voice
         first_message: str = "Hello! I'm here to help you with any questions you might have. How can I assist you today?"
     ) -> Dict[str, Any]:
         """
@@ -250,7 +251,7 @@ Be friendly, professional, and concise in your responses. Focus on solving the c
                 user_id=user_id,
                 agent_name=agent_name,
                 knowledge_base_file_ids=new_file_ids,
-                voice_id=agent.get('voice_id', 'pNInz6obpgDQGcFmaJgB'),
+                # voice_id=agent.get('voice_id', 'pNInz6obpgDQGcFmaJgB'),
                 first_message=agent.get('first_message', 'Hello! How can I help you?')
             )
             

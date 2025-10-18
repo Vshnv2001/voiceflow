@@ -713,7 +713,7 @@ export default function DashboardPage() {
                   {activeSessions.map((session) => (
                     <div
                       key={session.id}
-                      className="flex cursor-pointer items-center justify-between rounded-lg border border-border p-4 transition-colors hover:bg-accent"
+                      className="flex cursor-pointer items-center justify-between rounded-lg border border-border p-4 transition-colors hover:bg-blue-50 dark:hover:bg-blue-950/30"
                       onClick={() => router.push(`/session/${session.id}`)}
                     >
                       <div className="flex items-center gap-3">
@@ -739,7 +739,7 @@ export default function DashboardPage() {
                 {ongoingCalls.map((call) => (
                   <div
                     key={call.id}
-                    className="flex cursor-pointer items-center justify-between rounded-lg border border-border p-4 transition-colors hover:bg-accent"
+                    className="flex cursor-pointer items-center justify-between rounded-lg border border-border p-4 transition-colors hover:bg-blue-50 dark:hover:bg-blue-950/30"
                     onClick={() => router.push("/transcripts")}
                   >
                     <div className="flex items-center gap-3">

@@ -1051,7 +1051,7 @@ async def generate_and_stream_tts_audio(session_id: str, text: str) -> bool:
             return False
         
         # Use the same voice as the agent
-        voice_id = "goT3UYdM9bhm0n2lmKQx"  # Default voice - Rachel
+        voice_id = "rNn5VdexbUXFfpfA1WcF"  # Default voice - Rachel
         
         # ElevenLabs TTS API endpoint
         url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"

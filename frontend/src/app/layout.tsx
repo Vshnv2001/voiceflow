@@ -9,7 +9,7 @@ const _geist = Geist({ subsets: ["latin"] })
 const _geistMono = Geist_Mono({ subsets: ["latin"] })
 
 export const metadata: Metadata = {
-  title: "VoiceFlow AI - AI Voice Autocomplete for Customer Service",
+  title: "VoiceFlow AI - Cursor for Customer Service",
   description: "Empower your support team with real-time AI suggestions",
   generator: "v0.app",
 }

@@ -18,7 +18,7 @@ export default function HomePage() {
           AI-Powered Customer Service
         </Badge>
         <h1 className="mb-6 text-balance text-5xl font-bold tracking-tight md:text-6xl lg:text-7xl">
-          AI Voice Autocomplete for <span className="text-primary">Customer Service</span>
+          Cursor for <span className="text-primary">Customer Service</span>
         </h1>
         <p className="mx-auto mb-8 max-w-2xl text-pretty text-lg text-muted-foreground md:text-xl">
           Empower your support team with real-time AI suggestions. Respond faster, more accurately, and deliver
