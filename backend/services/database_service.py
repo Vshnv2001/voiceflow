@@ -147,6 +147,53 @@ class DatabaseService:
             print(f"Error closing session: {e}")
             return False
     
+    async def append_transcript(self, session_id: str, speaker: str, text: str) -> bool:
+        """
+        Append a transcript entry to the session's transcripts array.
+        
+        Args:
+            session_id: The session ID
+            speaker: 'user' or 'agent'
+            text: The transcript text
+            
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        try:
+            # Get current transcripts
+            result = self.supabase.table("sessions").select("transcripts").eq("id", session_id).single().execute()
+            
+            if not result.data:
+                print(f"Session {session_id} not found")
+                return False
+            
+            # Get existing transcripts or initialize empty array
+            current_transcripts = result.data.get("transcripts", [])
+            if current_transcripts is None:
+                current_transcripts = []
+            
+            # Create new transcript entry
+            new_entry = {
+                "timestamp": datetime.utcnow().isoformat(),
+                "speaker": speaker,
+                "text": text
+            }
+            
+            # Append new entry
+            current_transcripts.append(new_entry)
+            
+            # Update the session with new transcripts
+            update_result = self.supabase.table("sessions").update({
+                "transcripts": current_transcripts
+            }).eq("id", session_id).execute()
+            
+            print(f"✅ Transcript saved: [{speaker}] {text[:50]}...")
+            return len(update_result.data) > 0
+            
+        except Exception as e:
+            print(f"❌ Error appending transcript: {e}")
+            return False
+    
     # ==================== MESSAGE OPERATIONS ====================
     
     async def create_message(

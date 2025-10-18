@@ -107,10 +107,18 @@ async def handle_elevenlabs_proxy(
                     elif message_type == 'user_transcript':
                         transcript = message.get('user_transcription_event', {}).get('user_transcript', '')
                         logger.info(f"  👤 User said: {transcript}")
+                        
+                        # Save user transcript to database
+                        if transcript:
+                            await db_service.append_transcript(session_id, 'user', transcript)
                     
                     elif message_type == 'agent_response':
                         response = message.get('agent_response_event', {}).get('agent_response', '')
                         logger.info(f"  🤖 Agent response: {response}")
+                        
+                        # Save agent response to database
+                        if response:
+                            await db_service.append_transcript(session_id, 'agent', response)
                     
                     # Forward to frontend
                     await frontend_ws.send_text(data)
