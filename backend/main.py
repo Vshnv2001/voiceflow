@@ -442,8 +442,8 @@ async def upload_document(
         )
         
         return DocumentUploadResponse(
-            document_id=document.id,
-            file_url=document.file_url,
+            document_id=document['id'],
+            file_url=document['file_url'],
             status="processing",
             message="Document uploaded successfully and is being processed"
         )
