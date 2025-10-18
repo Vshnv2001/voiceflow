@@ -3,7 +3,7 @@ VoiceFlow AI - Voice-based Customer Service Backend
 FastAPI application for handling voice messages, AI responses, and agent approvals
 """
 
-from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, BackgroundTasks, Form, WebSocket, WebSocketDisconnect, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, BackgroundTasks, Form, WebSocket, WebSocketDisconnect, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
@@ -28,6 +28,8 @@ from services.database_service import DatabaseService
 from services.auth_service import AuthService
 from services.knowledge_service import KnowledgeService
 from websocket_proxy import handle_elevenlabs_proxy
+from websocket_proxy_with_agent_control import handle_elevenlabs_proxy_with_agent_control
+from agent_control_manager import agent_control_manager
 from models.schemas import (
     SessionCreate, SessionResponse, MessageCreate, MessageResponse,
     VoiceProcessingJobResponse, AgentApprovalRequest, SystemConfigUpdate,
@@ -742,25 +744,26 @@ async def process_voice_synthesis(message_id: str, text: str, voice_id: str):
 @app.websocket("/ws/conversation/{session_id}")
 async def websocket_conversation_proxy(websocket: WebSocket, session_id: str):
     """
-    WebSocket proxy endpoint that forwards messages between frontend and ElevenLabs API.
+    WebSocket proxy endpoint with AGENT CONTROL.
     
     This endpoint:
-    1. Accepts WebSocket connection from frontend
+    1. Accepts WebSocket connection from customer frontend
     2. Establishes connection to ElevenLabs API
-    3. Forwards messages bidirectionally
-    4. Logs all conversation data
+    3. Buffers AI responses for agent approval
+    4. Forwards approved responses to customer
     
     Usage:
-        Frontend connects to: ws://localhost:8000/ws/conversation/{session_id}
+        Customer frontend connects to: ws://localhost:8000/ws/conversation/{session_id}
         
     Message Flow:
-        Frontend → FastAPI → ElevenLabs (user audio, messages)
-        ElevenLabs → FastAPI → Frontend (agent audio, transcripts)
+        Customer → FastAPI → ElevenLabs (user audio)
+        ElevenLabs → FastAPI → Agent (suggested response text)
+        Agent approves → FastAPI → Customer (audio playback)
     """
     await websocket.accept()
     
     try:
-        await handle_elevenlabs_proxy(
+        await handle_elevenlabs_proxy_with_agent_control(
             frontend_ws=websocket,
             session_id=session_id,
             agent_id=elevenlabs_agent_id,
@@ -772,6 +775,110 @@ async def websocket_conversation_proxy(websocket: WebSocket, session_id: str):
             await websocket.send_json({"error": str(e)})
         except:
             pass
+
+
+@app.websocket("/ws/agent/{session_id}")
+async def websocket_agent_connection(websocket: WebSocket, session_id: str):
+    """
+    WebSocket endpoint for agent to receive suggested responses.
+    
+    This endpoint:
+    1. Connects agent to their active conversation session
+    2. Sends AI-generated response suggestions to agent
+    3. Agent can review/edit before sending to customer
+    
+    Usage:
+        Agent frontend connects to: ws://localhost:8000/ws/agent/{session_id}
+        
+    Messages Received:
+        {
+            "type": "suggested_response",
+            "text": "Hello! How can I help you today?"
+        }
+    """
+    await websocket.accept()
+    logger.info(f"Agent WebSocket connected for session: {session_id}")
+    
+    try:
+        # Register agent connection
+        await agent_control_manager.register_agent_connection(session_id, websocket)
+        
+        # Keep connection alive
+        while True:
+            try:
+                # Receive any messages from agent (for future use)
+                data = await websocket.receive_text()
+                message = json.loads(data)
+                logger.info(f"Received from agent: {message}")
+                
+                # Handle ping/pong for keep-alive
+                if message.get('type') == 'ping':
+                    await websocket.send_json({'type': 'pong'})
+                    
+            except WebSocketDisconnect:
+                logger.info(f"Agent disconnected for session: {session_id}")
+                break
+            except Exception as e:
+                logger.error(f"Error in agent WebSocket: {e}")
+                break
+    
+    finally:
+        # Unregister agent connection
+        await agent_control_manager.unregister_agent_connection(session_id)
+
+
+@app.post("/api/agent/send-response/{session_id}")
+async def send_agent_response(session_id: str, request: dict = Body(...)):
+    """
+    API endpoint for agent to approve and send a response to the customer.
+    
+    When called, this will:
+    1. Save the approved text to the database (transcripts)
+    2. Stream the buffered audio to the customer
+    
+    Request Body:
+        {
+            "text": "Approved response text (may be edited)"
+        }
+    
+    Returns:
+        {
+            "success": true,
+            "message": "Response sent to customer"
+        }
+    """
+    try:
+        approved_text = request.get('text', '')
+        
+        if not approved_text:
+            raise HTTPException(status_code=400, detail="Text is required")
+        
+        logger.info(f"Agent approving response for session {session_id}: {approved_text[:50]}...")
+        
+        # First, save the approved text to database
+        try:
+            await db_service.append_transcript(session_id, 'agent', approved_text)
+            logger.info(f"✅ Saved approved response to database")
+        except Exception as e:
+            logger.error(f"Error saving transcript: {e}")
+            # Continue anyway - audio should still play
+        
+        # Send the buffered audio to customer
+        success = await agent_control_manager.approve_and_send_response(session_id, approved_text)
+        
+        if not success:
+            raise HTTPException(status_code=404, detail="No pending response or customer not connected")
+        
+        return {
+            "success": True,
+            "message": "Response sent to customer"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error sending agent response: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ==================== HEALTH CHECK ====================
 
