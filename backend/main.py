@@ -3,7 +3,7 @@ VoiceFlow AI - Voice-based Customer Service Backend
 FastAPI application for handling voice messages, AI responses, and agent approvals
 """
 
-from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, BackgroundTasks, Form, WebSocket, WebSocketDisconnect, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, BackgroundTasks, Form, WebSocket, WebSocketDisconnect, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
@@ -15,7 +15,7 @@ import uuid
 import json
 import logging
 import io
-import numpy as np
+import websockets
 
 import uvicorn
 
@@ -27,7 +27,9 @@ from services.ai_service import AIService
 from services.database_service import DatabaseService
 from services.auth_service import AuthService
 from services.knowledge_service import KnowledgeService
-from services.elevenlabs_websocket_service import ElevenLabsWebSocketService
+from websocket_proxy import handle_elevenlabs_proxy
+from websocket_proxy_with_agent_control import handle_elevenlabs_proxy_with_agent_control
+from agent_control_manager import agent_control_manager
 from models.schemas import (
     SessionCreate, SessionResponse, MessageCreate, MessageResponse,
     VoiceProcessingJobResponse, AgentApprovalRequest, SystemConfigUpdate,
@@ -63,11 +65,11 @@ db_service = DatabaseService()
 auth_service = AuthService()
 knowledge_service = KnowledgeService()
 
-# Initialize ElevenLabs WebSocket service
+# ElevenLabs Configuration
 elevenlabs_api_key = os.getenv("ELEVENLABS_API_KEY")
+elevenlabs_agent_id = os.getenv("ELEVENLABS_AGENT_ID", "agent_4901k7vt2tdffjw9qrkhk4by8ecp")
 if not elevenlabs_api_key:
-    raise ValueError("ELEVENLABS_API_KEY environment variable is required")
-elevenlabs_ws_service = ElevenLabsWebSocketService(elevenlabs_api_key)
+    logger.warning("ELEVENLABS_API_KEY not set - ElevenLabs features will not work")
 
 # Dependency to get current user
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
@@ -736,288 +738,147 @@ async def process_voice_synthesis(message_id: str, text: str, voice_id: str):
         if job_id:
             await db_service.update_voice_job(job_id, "failed", error_message=str(e))
 
+
 # ==================== WEBSOCKET ENDPOINTS ====================
 
-@app.websocket("/ws/elevenlabs/{agent_id}")
-async def websocket_endpoint(
-    websocket: WebSocket,
-    agent_id: str
-):
-    """WebSocket endpoint for ElevenLabs agent conversations"""
+@app.websocket("/ws/conversation/{session_id}")
+async def websocket_conversation_proxy(websocket: WebSocket, session_id: str):
+    """
+    WebSocket proxy endpoint with AGENT CONTROL.
+    
+    This endpoint:
+    1. Accepts WebSocket connection from customer frontend
+    2. Establishes connection to ElevenLabs API
+    3. Buffers AI responses for agent approval
+    4. Forwards approved responses to customer
+    
+    Usage:
+        Customer frontend connects to: ws://localhost:8000/ws/conversation/{session_id}
+        
+    Message Flow:
+        Customer → FastAPI → ElevenLabs (user audio)
+        ElevenLabs → FastAPI → Agent (suggested response text)
+        Agent approves → FastAPI → Customer (audio playback)
+    """
     await websocket.accept()
     
     try:
-        # Get query parameters
-        query_params = websocket.query_params
-        session_id = query_params.get("session_id")
-        user_id = query_params.get("user_id")
-        
-        # Validate required parameters
-        if not session_id or not user_id:
-            await websocket.close(code=1008, reason="Missing session_id or user_id")
-            return
-        
-        # Create WebSocket connection
-        connection_id = await elevenlabs_ws_service.create_connection(
-            websocket=websocket,
-            agent_id=agent_id,
+        await handle_elevenlabs_proxy_with_agent_control(
+            frontend_ws=websocket,
             session_id=session_id,
-            user_id=user_id
+            agent_id=elevenlabs_agent_id,
+            db_service=db_service
         )
-        
-        # Send connection confirmation
-        await websocket.send_json({
-            "type": "connection_established",
-            "connection_id": connection_id,
-            "agent_id": agent_id,
-            "session_id": session_id,
-            "user_id": user_id
-        })
-        
-        # Wait for the connection to be closed by the ElevenLabs service
-        # The message forwarding is handled by the service's background task
-        try:
-            while True:
-                # Just keep the connection alive - message handling is done by the service
-                await asyncio.sleep(1)
-        except WebSocketDisconnect:
-            pass
-                
     except Exception as e:
-        logger.error(f"WebSocket connection error: {e}")
-        try:
-            await websocket.close(code=1011, reason="Internal server error")
-        except:
-            pass
-    finally:
-        # Clean up connection
-        if 'connection_id' in locals():
-            await elevenlabs_ws_service.close_connection(connection_id)
-
-@app.post("/api/websocket/connect", response_model=WebSocketConnectionResponse)
-async def create_websocket_connection(
-    request: WebSocketConnectionRequest,
-    current_user: dict = Depends(get_current_user)
-):
-    """Create a WebSocket connection for ElevenLabs agent"""
-    try:
-        # Validate session belongs to user
-        session = await db_service.get_session(request.session_id, current_user["id"])
-        if not session:
-            raise HTTPException(status_code=404, detail="Session not found")
-        
-        # Generate connection URL
-        connection_url = f"/ws/elevenlabs/{request.agent_id}?session_id={request.session_id}&user_id={current_user['id']}"
-        
-        return WebSocketConnectionResponse(
-            connection_id="pending",  # Will be set when WebSocket connects
-            status="ready",
-            message=f"Connect to WebSocket at: {connection_url}"
-        )
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/websocket/connections")
-async def list_websocket_connections(
-    current_user: dict = Depends(get_current_user)
-):
-    """List active WebSocket connections"""
-    try:
-        connections = elevenlabs_ws_service.list_connections()
-        return {"connections": connections}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.delete("/api/websocket/connections/{connection_id}")
-async def close_websocket_connection(
-    connection_id: str,
-    current_user: dict = Depends(get_current_user)
-):
-    """Close a WebSocket connection"""
-    try:
-        await elevenlabs_ws_service.close_connection(connection_id)
-        return {"message": "Connection closed successfully"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# ==================== WEBSOCKET AUDIO STREAMING ====================
-
-class AudioBuffer:
-    """Buffer to accumulate audio chunks and detect silence"""
-    def __init__(self, silence_threshold: float = 0.01, silence_duration: float = 2.0, sample_rate: int = 16000):
-        self.buffer = []
-        self.silence_threshold = silence_threshold
-        self.silence_duration = silence_duration
-        self.sample_rate = sample_rate
-        self.silence_samples = int(silence_duration * sample_rate)
-        self.current_silence_count = 0
-        
-    def add_chunk(self, audio_data: bytes) -> bool:
-        """
-        Add audio chunk to buffer and check for silence.
-        Returns True if silence detected for specified duration.
-        """
-        self.buffer.append(audio_data)
-        
-        # Convert bytes to numpy array for amplitude analysis
-        try:
-            audio_array = np.frombuffer(audio_data, dtype=np.int16)
-            # Normalize to -1.0 to 1.0
-            audio_normalized = audio_array.astype(np.float32) / 32768.0
-            
-            # Calculate RMS (Root Mean Square) for volume level
-            rms = np.sqrt(np.mean(audio_normalized ** 2))
-            
-            # Check if this chunk is silent
-            if rms < self.silence_threshold:
-                self.current_silence_count += len(audio_array)
-            else:
-                # Reset silence counter if sound detected
-                self.current_silence_count = 0
-            
-            # Return True if we've had enough silence
-            return self.current_silence_count >= self.silence_samples
-            
-        except Exception as e:
-            print(f"Error processing audio chunk: {e}")
-            return False
-    
-    def get_audio(self) -> bytes:
-        """Get all buffered audio as bytes"""
-        return b''.join(self.buffer)
-    
-    def clear(self):
-        """Clear the buffer"""
-        self.buffer = []
-        self.current_silence_count = 0
-
-
-@app.websocket("/ws/audio/{session_id}")
-async def websocket_audio_endpoint(websocket: WebSocket, session_id: str):
-    """
-    WebSocket endpoint for real-time audio streaming.
-    
-    Flow:
-    1. Client connects and sends audio chunks
-    2. Server buffers audio and detects silence
-    3. After 2 seconds of silence, processes the audio and responds
-    4. Continues until client disconnects
-    
-    Message format:
-    - Client sends: binary audio data (PCM 16-bit, 16kHz recommended)
-    - Server sends: JSON with response audio URL or direct audio bytes
-    """
-    await websocket.accept()
-    print(f"WebSocket connection established for session: {session_id}")
-    
-    # Verify session exists (query directly without customer_rep_id check for customer access)
-    try:
-        result = db_service.supabase.table("sessions").select("*").eq("id", session_id).single().execute()
-        if not result.data:
-            await websocket.send_json({"error": "Session not found"})
-            await websocket.close()
-            return
-        session = result.data
-    except Exception as e:
-        await websocket.send_json({"error": f"Failed to verify session: {str(e)}"})
-        await websocket.close()
-        return
-    
-    audio_buffer = AudioBuffer(
-        silence_threshold=0.01,  # Adjust based on your needs
-        silence_duration=2.0,     # 2 seconds of silence
-        sample_rate=16000         # 16kHz sample rate
-    )
-    
-    try:
-        while True:
-            # Receive audio data from client
-            data = await websocket.receive()
-            
-            if "bytes" in data:
-                audio_chunk = data["bytes"]
-                
-                # Add chunk to buffer and check for silence
-                silence_detected = audio_buffer.add_chunk(audio_chunk)
-                
-                if silence_detected:
-                    print(f"Silence detected for session {session_id}, processing audio...")
-                    
-                    # Get all buffered audio
-                    complete_audio = audio_buffer.get_audio()
-                    
-                    # Send acknowledgment
-                    await websocket.send_json({
-                        "status": "processing",
-                        "message": "Audio received, processing..."
-                    })
-                    
-                    try:
-                        # ECHO MODE: Just send back the same audio for testing
-                        # Save audio to temp file for echo
-                        temp_audio_path = f"/tmp/audio_{session_id}_{uuid.uuid4()}.wav"
-                        
-                        # Write raw PCM data to WAV file
-                        import wave
-                        with wave.open(temp_audio_path, 'wb') as wav_file:
-                            wav_file.setnchannels(1)  # Mono
-                            wav_file.setsampwidth(2)  # 16-bit
-                            wav_file.setframerate(16000)  # 16kHz
-                            wav_file.writeframes(complete_audio)
-                        
-                        print(f"Echo mode: Sending back audio - {len(complete_audio)} bytes")
-                        
-                        # Read the audio file and send as bytes (ECHO)
-                        with open(temp_audio_path, 'rb') as audio_file:
-                            response_audio_bytes = audio_file.read()
-                        
-                        # Send response status
-                        await websocket.send_json({
-                            "status": "complete",
-                            "transcript": "[Echo mode - audio will be played back]",
-                            "response_text": "This is your audio played back to you"
-                        })
-                        
-                        # Send the same audio back (echo)
-                        await websocket.send_bytes(response_audio_bytes)
-                        
-                        print(f"Echo sent: {len(response_audio_bytes)} bytes")
-                        
-                        # Cleanup temp file
-                        os.remove(temp_audio_path)
-                        
-                    except Exception as e:
-                        print(f"Error processing audio: {e}")
-                        import traceback
-                        traceback.print_exc()
-                        await websocket.send_json({
-                            "status": "error",
-                            "error": str(e)
-                        })
-                    
-                    # Clear buffer for next utterance
-                    audio_buffer.clear()
-            
-            elif "text" in data:
-                # Handle text messages (e.g., control messages)
-                message = data["text"]
-                print(f"Received text message: {message}")
-                
-                if message == "ping":
-                    await websocket.send_json({"status": "pong"})
-                    
-    except WebSocketDisconnect:
-        print(f"WebSocket disconnected for session: {session_id}")
-    except Exception as e:
-        print(f"WebSocket error for session {session_id}: {e}")
+        logger.error(f"WebSocket proxy error for session {session_id}: {e}")
         try:
             await websocket.send_json({"error": str(e)})
         except:
             pass
-    finally:
-        print(f"Closing WebSocket for session: {session_id}")
 
+
+@app.websocket("/ws/agent/{session_id}")
+async def websocket_agent_connection(websocket: WebSocket, session_id: str):
+    """
+    WebSocket endpoint for agent to receive suggested responses.
+    
+    This endpoint:
+    1. Connects agent to their active conversation session
+    2. Sends AI-generated response suggestions to agent
+    3. Agent can review/edit before sending to customer
+    
+    Usage:
+        Agent frontend connects to: ws://localhost:8000/ws/agent/{session_id}
+        
+    Messages Received:
+        {
+            "type": "suggested_response",
+            "text": "Hello! How can I help you today?"
+        }
+    """
+    await websocket.accept()
+    logger.info(f"Agent WebSocket connected for session: {session_id}")
+    
+    try:
+        # Register agent connection
+        await agent_control_manager.register_agent_connection(session_id, websocket)
+        
+        # Keep connection alive
+        while True:
+            try:
+                # Receive any messages from agent (for future use)
+                data = await websocket.receive_text()
+                message = json.loads(data)
+                logger.info(f"Received from agent: {message}")
+                
+                # Handle ping/pong for keep-alive
+                if message.get('type') == 'ping':
+                    await websocket.send_json({'type': 'pong'})
+                    
+            except WebSocketDisconnect:
+                logger.info(f"Agent disconnected for session: {session_id}")
+                break
+            except Exception as e:
+                logger.error(f"Error in agent WebSocket: {e}")
+                break
+    
+    finally:
+        # Unregister agent connection
+        await agent_control_manager.unregister_agent_connection(session_id)
+
+
+@app.post("/api/agent/send-response/{session_id}")
+async def send_agent_response(session_id: str, request: dict = Body(...)):
+    """
+    API endpoint for agent to approve and send a response to the customer.
+    
+    When called, this will:
+    1. Save the approved text to the database (transcripts)
+    2. Stream the buffered audio to the customer
+    
+    Request Body:
+        {
+            "text": "Approved response text (may be edited)"
+        }
+    
+    Returns:
+        {
+            "success": true,
+            "message": "Response sent to customer"
+        }
+    """
+    try:
+        approved_text = request.get('text', '')
+        
+        if not approved_text:
+            raise HTTPException(status_code=400, detail="Text is required")
+        
+        logger.info(f"Agent approving response for session {session_id}: {approved_text[:50]}...")
+        
+        # First, save the approved text to database
+        try:
+            await db_service.append_transcript(session_id, 'agent', approved_text)
+            logger.info(f"✅ Saved approved response to database")
+        except Exception as e:
+            logger.error(f"Error saving transcript: {e}")
+            # Continue anyway - audio should still play
+        
+        # Send the buffered audio to customer
+        success = await agent_control_manager.approve_and_send_response(session_id, approved_text)
+        
+        if not success:
+            raise HTTPException(status_code=404, detail="No pending response or customer not connected")
+        
+        return {
+            "success": True,
+            "message": "Response sent to customer"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error sending agent response: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ==================== HEALTH CHECK ====================
 

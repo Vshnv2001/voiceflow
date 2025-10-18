@@ -115,15 +115,15 @@ export default function ConversationPage() {
       streamRef.current = stream
       setStatusMessage("Microphone access granted")
       
-      // Connect directly to ElevenLabs API
-      const wsUrl = `wss://api.elevenlabs.io/v1/convai/conversation?agent_id=${ELEVENLABS_AGENT_ID}`
+      // Connect to FastAPI backend proxy (which forwards to ElevenLabs)
+      const wsUrl = `ws://localhost:8000/ws/conversation/${sessionId}`
       const ws = new WebSocket(wsUrl)
       wsRef.current = ws
       
       ws.onopen = () => {
-        console.log("Connected to ElevenLabs WebSocket")
+        console.log("Connected to FastAPI backend (proxying to ElevenLabs)")
         setIsConnected(true)
-        setStatusMessage("Connected to ElevenLabs")
+        setStatusMessage("Connected to AI Agent")
         
         // Send conversation initiation (without prompt override since agent doesn't allow it)
         const initMessage = {
@@ -210,20 +210,20 @@ export default function ConversationPage() {
       }
       
       ws.onerror = (error) => {
-        console.error("ElevenLabs WebSocket error:", error)
+        console.error("Backend WebSocket error:", error)
         setStatusMessage("Connection error")
         setIsConnected(false)
       }
       
       ws.onclose = (event) => {
-        console.log("ElevenLabs WebSocket closed:", event.code, event.reason)
+        console.log("Backend WebSocket closed:", event.code, event.reason)
         setIsConnected(false)
         setStatusMessage("Disconnected")
         stopAudioCapture()
       }
       
     } catch (error) {
-      console.error("Error connecting to ElevenLabs:", error)
+      console.error("Error connecting to backend:", error)
       setStatusMessage(`Error: ${error instanceof Error ? error.message : 'Failed to connect'}`)
     }
   }

@@ -2,6 +2,12 @@ import { useEffect, useState } from 'react'
 import { supabase } from '@/lib/supabase'
 import { useAuth } from '@/contexts/AuthContext'
 
+interface TranscriptEntry {
+  timestamp: string
+  speaker: 'user' | 'agent'
+  text: string
+}
+
 interface Session {
   id: string
   customer_rep_id: string
@@ -11,6 +17,7 @@ interface Session {
   updated_at: string
   closed_at: string | null
   metadata: Record<string, any>
+  transcripts?: TranscriptEntry[]
 }
 
 export function useAllSessions() {
@@ -29,14 +36,14 @@ export function useAllSessions() {
     
     console.log('useAllSessions: User found, fetching all sessions for user.id:', user.id)
 
-    // Initial fetch of all sessions (active, pending, closed)
+    // Initial fetch of all sessions (active, pending, closed) including transcripts
     const fetchAllSessions = async () => {
       try {
         setLoading(true)
-        console.log('Fetching all sessions from Supabase...')
+        console.log('Fetching all sessions from Supabase with transcripts...')
         const { data, error } = await supabase
           .from('sessions')
-          .select('*')
+          .select('id, customer_rep_id, customer_name, status, created_at, updated_at, closed_at, metadata, transcripts')
           .eq('customer_rep_id', user.id)
           .order('created_at', { ascending: false })
 
@@ -61,11 +68,11 @@ export function useAllSessions() {
     console.log('Calling fetchAllSessions()...')
     fetchAllSessions()
 
-    // Set up polling - refetch every 5 seconds
+    // Set up polling - refetch every 2 seconds for faster updates
     const pollInterval = setInterval(() => {
       console.log('Polling: Refetching all sessions...')
       fetchAllSessions()
-    }, 5000) // Poll every 5 seconds
+    }, 2000) // Poll every 2 seconds
 
     // Set up real-time subscription
     const channel = supabase

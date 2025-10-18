@@ -6,16 +6,16 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Avatar } from "@/components/ui/avatar"
-import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { 
   Phone, PhoneOff, Mic, MicOff, Volume2, VolumeX, 
   User, Clock, ArrowLeft, Send, MessageCircle,
-  MoreVertical, AlertCircle, CheckCircle
+  MoreVertical, AlertCircle, CheckCircle, Loader2
 } from "lucide-react"
 import Navigation from "@/components/Navigation"
 import { useSessionStatus } from "@/hooks/useSessionStatus"
 import { useAuth } from "@/contexts/AuthContext"
+import { supabase } from "@/lib/supabase"
 
 interface Message {
   id: string
@@ -44,80 +44,214 @@ export default function AgentConversationPage() {
   const [messages, setMessages] = useState<Message[]>([])
   const scrollAreaRef = useRef<HTMLDivElement>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
-  
-  // Suggested responses
-  const [suggestedResponses, setSuggestedResponses] = useState([
-    "Thank you for contacting us. I'll be happy to help you with that.",
-    "I understand your concern. Let me look into this for you right away.",
-    "Could you please provide me with your order number?",
-    "I've checked your account and I can see the issue. Let me help you resolve this.",
-    "Is there anything else I can help you with today?"
-  ])
-  const [selectedSuggestion, setSelectedSuggestion] = useState<string | null>(null)
-  const [editingSuggestion, setEditingSuggestion] = useState("")
+  const previousMessageCountRef = useRef<number>(0)
+  const agentWsRef = useRef<WebSocket | null>(null)
+  const [isSending, setIsSending] = useState(false)
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
 
-  // Load dummy messages
+  // Load transcripts from database and set up aggressive real-time polling
   useEffect(() => {
-    if (session?.status === 'active') {
-      // Dummy messages for testing
-      setMessages([
-        {
-          id: '1',
-          speaker: 'system',
-          content: `Call started with ${session.customer_name || 'Customer'}`,
-          timestamp: new Date(session.created_at),
-          type: 'system'
-        },
-        {
-          id: '2',
-          speaker: 'customer',
-          content: "Hi, I need help with my recent order. It hasn't arrived yet.",
-          timestamp: new Date(Date.now() - 120000),
-          type: 'text'
-        },
-        {
-          id: '3',
-          speaker: 'agent',
-          content: "Hello! I'd be happy to help you with your order. Could you please provide your order number?",
-          timestamp: new Date(Date.now() - 110000),
-          type: 'text'
-        },
-        {
-          id: '4',
-          speaker: 'customer',
-          content: "Sure, it's #ORD-12345",
-          timestamp: new Date(Date.now() - 95000),
-          type: 'text'
-        },
-        {
-          id: '5',
-          speaker: 'agent',
-          content: "Thank you! Let me pull up your order details. I can see your order was placed on March 15th. What seems to be the issue?",
-          timestamp: new Date(Date.now() - 85000),
-          type: 'text'
-        },
-        {
-          id: '6',
-          speaker: 'customer',
-          content: "I was expecting it to arrive last week but it still hasn't shown up.",
-          timestamp: new Date(Date.now() - 70000),
-          type: 'text'
-        },
-        {
-          id: '7',
-          speaker: 'agent',
-          content: "I understand your concern. Let me check the shipping status for you right away.",
-          timestamp: new Date(Date.now() - 60000),
-          type: 'text'
-        },
-      ])
+    if (!sessionId) {
       setLoading(false)
+      return
     }
-  }, [session?.status, session?.created_at, session?.customer_name])
 
-  // Auto-scroll to bottom when new messages arrive
+    const loadTranscripts = async () => {
+      try {
+        const { data, error } = await supabase
+          .from('sessions')
+          .select('transcripts, customer_name, created_at')
+          .eq('id', sessionId)
+          .single()
+
+        if (error) {
+          console.error('Error loading transcripts:', error)
+          setLoading(false)
+          return
+        }
+
+        // Convert database transcripts to message format
+        const formattedMessages: Message[] = [
+          {
+            id: 'system-1',
+          speaker: 'system',
+            content: `Call started with ${data.customer_name || 'Customer'}`,
+            timestamp: new Date(data.created_at),
+          type: 'system'
+          }
+        ]
+
+        if (data.transcripts && Array.isArray(data.transcripts)) {
+          data.transcripts.forEach((entry: any, index: number) => {
+            formattedMessages.push({
+              id: `transcript-${index}`,
+              speaker: entry.speaker === 'user' ? 'customer' : 'agent',
+              content: entry.text,
+              timestamp: new Date(entry.timestamp),
+          type: 'text'
+            })
+          })
+        }
+
+        setMessages(formattedMessages)
+        setLoading(false)
+      } catch (err) {
+        console.error('Failed to load transcripts:', err)
+        setLoading(false)
+      }
+    }
+
+    // Initial load
+    loadTranscripts()
+
+    // Aggressive polling every 500ms for real-time updates
+    console.log('🔄 Starting aggressive polling for agent conversation')
+    const pollInterval = setInterval(() => {
+      loadTranscripts()
+    }, 500)
+
+    // Set up real-time subscription as backup
+    const channel = supabase
+      .channel(`session-${sessionId}-transcripts`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'sessions',
+          filter: `id=eq.${sessionId}`
+        },
+        (payload: any) => {
+          console.log('🔔 Real-time update received, reloading transcripts')
+          loadTranscripts()
+        }
+      )
+      .subscribe()
+
+    return () => {
+      console.log('🧹 Cleaning up polling and subscription')
+      clearInterval(pollInterval)
+      supabase.removeChannel(channel)
+    }
+  }, [sessionId])
+
+  // Connect to agent WebSocket to receive AI suggestions
   useEffect(() => {
+    if (!sessionId) return
+    
+    // Only connect if session is active
+    if (session?.status !== 'active') {
+      console.log('⏸️ Session not active yet, waiting to connect agent WebSocket...')
+      return
+    }
+
+    console.log('🔌 Connecting to agent WebSocket for session:', sessionId)
+    
+    let reconnectTimeout: NodeJS.Timeout
+    let shouldReconnect = true
+
+    const connectAgentWebSocket = () => {
+      try {
+        const ws = new WebSocket(`ws://localhost:8000/ws/agent/${sessionId}`)
+        agentWsRef.current = ws
+
+        ws.onopen = () => {
+          console.log('✅ Agent WebSocket connected')
+          
+          // Send ping every 30 seconds to keep connection alive
+          const pingInterval = setInterval(() => {
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: 'ping' }))
+            }
+          }, 30000)
+
+          // Store interval to clear later
+          ;(ws as any).pingInterval = pingInterval
+        }
+
+        ws.onmessage = (event) => {
+          try {
+            const message = JSON.parse(event.data)
+            console.log('📨 Received from backend:', message)
+
+            if (message.type === 'suggested_response') {
+              // Populate the input box with the suggested response
+              console.log('💡 AI Suggestion:', message.text)
+              setMessage(message.text)
+            }
+          } catch (error) {
+            console.error('Error parsing WebSocket message:', error)
+          }
+        }
+
+        ws.onerror = (error) => {
+          console.warn('⚠️ Agent WebSocket connection error (this is normal if customer hasn\'t started talking yet)')
+        }
+
+        ws.onclose = (event) => {
+          console.log('🔌 Agent WebSocket closed:', event.code, event.reason)
+          
+          // Clear ping interval
+          if ((ws as any).pingInterval) {
+            clearInterval((ws as any).pingInterval)
+          }
+          
+          // Attempt to reconnect after 3 seconds if still needed
+          if (shouldReconnect && session?.status === 'active') {
+            console.log('🔄 Reconnecting agent WebSocket in 3 seconds...')
+            reconnectTimeout = setTimeout(() => {
+              connectAgentWebSocket()
+            }, 3000)
+          }
+        }
+      } catch (error) {
+        console.error('Failed to create WebSocket:', error)
+        
+        // Retry connection after 3 seconds
+        if (shouldReconnect && session?.status === 'active') {
+          reconnectTimeout = setTimeout(() => {
+            connectAgentWebSocket()
+          }, 3000)
+        }
+      }
+    }
+
+    connectAgentWebSocket()
+
+    return () => {
+      shouldReconnect = false
+      
+      if (reconnectTimeout) {
+        clearTimeout(reconnectTimeout)
+      }
+      
+      if (agentWsRef.current) {
+        console.log('🧹 Closing agent WebSocket')
+        // Clear ping interval
+        if ((agentWsRef.current as any).pingInterval) {
+          clearInterval((agentWsRef.current as any).pingInterval)
+        }
+        agentWsRef.current.close()
+      }
+    }
+  }, [sessionId, session?.status])
+
+  // Smart auto-scroll: only scroll when NEW messages arrive (not on every re-render)
+  useEffect(() => {
+    const currentCount = messages.length
+    const previousCount = previousMessageCountRef.current
+
+    // Only scroll if there are NEW messages (count increased)
+    // Skip on initial load (previousCount === 0) to prevent auto-scroll on page load
+    if (currentCount > previousCount && previousCount > 0) {
+      console.log('📜 New message detected, auto-scrolling to bottom')
+      setTimeout(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
+      }, 100)
+    }
+
+    // Update the reference
+    previousMessageCountRef.current = currentCount
   }, [messages])
 
   // Call duration timer
@@ -167,46 +301,42 @@ export default function AgentConversationPage() {
     // TODO: Implement actual speaker logic
   }
 
-  const handleSendMessage = () => {
-    if (message.trim()) {
-      const newMessage: Message = {
-        id: Date.now().toString(),
-        speaker: 'agent',
-        content: message,
-        timestamp: new Date(),
-        type: 'text'
+  const handleSendMessage = async () => {
+    if (!message.trim() || isSending) return
+
+    console.log('📤 Sending approved response:', message)
+    setIsSending(true)
+
+    try {
+      // Call backend API to approve and send response
+      const response = await fetch(`http://localhost:8000/api/agent/send-response/${sessionId}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          text: message
+        })
+      })
+
+      if (!response.ok) {
+        const error = await response.json()
+        throw new Error(error.detail || 'Failed to send response')
       }
-      setMessages([...messages, newMessage])
+
+      console.log('✅ Response sent successfully!')
+
+      // Clear the input
       setMessage("")
-      setSelectedSuggestion(null)
-      setEditingSuggestion("")
-    }
-  }
 
-  const handleSelectSuggestion = (suggestion: string) => {
-    setSelectedSuggestion(suggestion)
-    setEditingSuggestion(suggestion)
-    setMessage(suggestion)
-  }
+      // Message is now in chat history (saved when Send clicked)
+      // The polling will pick it up automatically
 
-  const handleEditSuggestion = (text: string) => {
-    setEditingSuggestion(text)
-    setMessage(text)
-  }
-
-  const handleSendSuggestion = () => {
-    if (editingSuggestion.trim()) {
-      const newMessage: Message = {
-        id: Date.now().toString(),
-        speaker: 'agent',
-        content: editingSuggestion,
-        timestamp: new Date(),
-        type: 'text'
-      }
-      setMessages([...messages, newMessage])
-      setMessage("")
-      setSelectedSuggestion(null)
-      setEditingSuggestion("")
+    } catch (error) {
+      console.error('❌ Error sending response:', error)
+      alert(`Failed to send response: ${error instanceof Error ? error.message : 'Unknown error'}`)
+    } finally {
+      setIsSending(false)
     }
   }
 
@@ -216,6 +346,17 @@ export default function AgentConversationPage() {
       handleSendMessage()
     }
   }
+
+  // Auto-resize textarea as content grows
+  useEffect(() => {
+    const textarea = textareaRef.current
+    if (textarea) {
+      // Reset height to auto to get the correct scrollHeight
+      textarea.style.height = 'auto'
+      // Set height to scrollHeight (content height)
+      textarea.style.height = `${Math.min(textarea.scrollHeight, 200)}px`
+    }
+  }, [message])
 
   if (sessionLoading || loading) {
     return (
@@ -369,20 +510,30 @@ export default function AgentConversationPage() {
 
               {/* Message Input */}
               <div className="border-t p-4">
-                <div className="flex gap-2">
-                  <Input
+                <div className="flex gap-2 items-end">
+                  <textarea
+                    ref={textareaRef}
                     value={message}
                     onChange={(e) => setMessage(e.target.value)}
                     onKeyPress={handleKeyPress}
-                    placeholder="Type a message... (dummy input for now)"
-                    className="flex-1"
+                    placeholder="AI suggestions will appear here..."
+                    className="flex-1 min-h-[40px] max-h-[200px] px-3 py-2 text-sm border border-input rounded-md bg-background resize-none focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent"
+                    rows={1}
                   />
-                  <Button onClick={handleSendMessage} size="icon">
+                  <Button 
+                    onClick={handleSendMessage} 
+                    size="icon"
+                    disabled={isSending || !message.trim()}
+                  >
+                    {isSending ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
                     <Send className="h-4 w-4" />
+                    )}
                   </Button>
                 </div>
                 <p className="text-xs text-muted-foreground mt-2">
-                  Press Enter to send • This is a dummy chat for UI testing
+                  AI will suggest responses - Review and click Send to play audio to customer
                 </p>
               </div>
             </Card>
@@ -425,71 +576,6 @@ export default function AgentConversationPage() {
               </CardContent>
             </Card>
 
-            {/* Suggested Responses */}
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-lg">💡 Suggested Responses</CardTitle>
-                <p className="text-xs text-muted-foreground mt-1">
-                  Click to use, edit before sending
-                </p>
-              </CardHeader>
-              <CardContent className="space-y-3">
-                <ScrollArea className="h-[300px] pr-3">
-                  <div className="space-y-2">
-                    {suggestedResponses.map((suggestion, index) => (
-                      <div
-                        key={index}
-                        onClick={() => handleSelectSuggestion(suggestion)}
-                        className={`p-3 rounded-lg border-2 cursor-pointer transition-all hover:border-primary hover:bg-primary/5 ${
-                          selectedSuggestion === suggestion
-                            ? 'border-primary bg-primary/10'
-                            : 'border-border bg-muted/50'
-                        }`}
-                      >
-                        <p className="text-sm">{suggestion}</p>
-                      </div>
-                    ))}
-                  </div>
-                </ScrollArea>
-
-                {selectedSuggestion && (
-                  <div className="border-t pt-3 space-y-3">
-                    <div>
-                      <label className="text-xs font-medium text-muted-foreground mb-2 block">
-                        Edit Response:
-                      </label>
-                      <textarea
-                        value={editingSuggestion}
-                        onChange={(e) => handleEditSuggestion(e.target.value)}
-                        className="w-full min-h-[100px] text-sm p-3 border rounded-lg resize-none focus:outline-none focus:ring-2 focus:ring-primary"
-                        placeholder="Edit the suggested response..."
-                      />
-                    </div>
-                    <div className="flex gap-2">
-                      <Button
-                        onClick={handleSendSuggestion}
-                        size="sm"
-                        className="flex-1"
-                      >
-                        <Send className="h-3 w-3 mr-1" />
-                        Send
-                      </Button>
-                      <Button
-                        onClick={() => {
-                          setSelectedSuggestion(null)
-                          setEditingSuggestion("")
-                        }}
-                        size="sm"
-                        variant="outline"
-                      >
-                        Cancel
-                      </Button>
-                    </div>
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-
             {/* Session Info */}
             <Card>
               <CardHeader>
@@ -522,22 +608,6 @@ export default function AgentConversationPage() {
                     {new Date(session.created_at).toLocaleString()}
                   </p>
                 </div>
-              </CardContent>
-            </Card>
-
-            {/* Quick Notes */}
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-lg">Quick Notes</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <textarea 
-                  className="w-full min-h-[100px] text-sm p-3 border rounded-lg resize-none"
-                  placeholder="Add notes about this call..."
-                />
-                <Button size="sm" className="w-full mt-2">
-                  Save Notes
-                </Button>
               </CardContent>
             </Card>
           </div>

@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useRef } from "react"
 import { Card } from "@/components/ui/card"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { Badge } from "@/components/ui/badge"
@@ -10,11 +10,28 @@ import { Phone, Clock, ArrowLeft } from "lucide-react"
 import Link from "next/link"
 import Navigation from "@/components/Navigation"
 import { useAllSessions } from "@/hooks/useAllSessions"
+import { supabase } from "@/lib/supabase"
 
+// Format database transcripts for UI display
+const formatTranscripts = (transcripts: any[]) => {
+  if (!transcripts || !Array.isArray(transcripts)) return []
+  
+  return transcripts.map((entry) => ({
+    speaker: entry.speaker === 'user' ? 'customer' : 'agent',
+    message: entry.text,
+    time: new Date(entry.timestamp).toLocaleTimeString('en-US', {
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: true
+    })
+  }))
+}
 
 export default function TranscriptsPage() {
   const { activeSessions, loading } = useAllSessions()
   const [selectedCall, setSelectedCall] = useState<any>(null)
+  const transcriptEndRef = useRef<HTMLDivElement>(null)
+  const previousTranscriptLengthRef = useRef<number>(0)
 
   // Set first active session as selected when data loads
   useEffect(() => {
@@ -22,6 +39,109 @@ export default function TranscriptsPage() {
       setSelectedCall(activeSessions[0])
     }
   }, [activeSessions, selectedCall])
+
+  // Aggressive polling for real-time transcript updates
+  useEffect(() => {
+    if (!selectedCall?.id) return
+
+    console.log('🔄 Setting up aggressive polling for session:', selectedCall.id)
+
+    // Function to fetch latest transcripts
+    const fetchLatestTranscripts = async () => {
+      try {
+        const { data, error } = await supabase
+          .from('sessions')
+          .select('transcripts')
+          .eq('id', selectedCall.id)
+          .single()
+
+        if (error) {
+          console.error('Error fetching transcripts:', error)
+          return
+        }
+
+        if (data && data.transcripts) {
+          // Only update if transcripts have changed
+          const currentLength = selectedCall.transcripts?.length || 0
+          const newLength = data.transcripts?.length || 0
+          
+          if (newLength !== currentLength) {
+            console.log('📨 New transcripts detected! Updating...', {
+              old: currentLength,
+              new: newLength
+            })
+            
+            setSelectedCall((prev: any) => ({
+              ...prev,
+              transcripts: data.transcripts
+            }))
+          }
+        }
+      } catch (err) {
+        console.error('Error in polling:', err)
+      }
+    }
+
+    // Initial fetch
+    fetchLatestTranscripts()
+
+    // Poll every 500ms (twice per second) for near real-time updates
+    const pollInterval = setInterval(() => {
+      fetchLatestTranscripts()
+    }, 500)
+
+    // Also set up Supabase real-time subscription as backup
+    const channel = supabase
+      .channel(`transcripts-${selectedCall.id}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'sessions',
+          filter: `id=eq.${selectedCall.id}`
+        },
+        (payload: any) => {
+          console.log('🔔 Real-time update via Supabase subscription:', payload)
+          
+          if (payload.new && payload.new.transcripts) {
+            setSelectedCall((prev: any) => ({
+              ...prev,
+              transcripts: payload.new.transcripts
+            }))
+          }
+        }
+      )
+      .subscribe((status) => {
+        console.log('📡 Supabase subscription status:', status)
+      })
+
+    return () => {
+      console.log('🧹 Cleaning up polling and subscription for session:', selectedCall.id)
+      clearInterval(pollInterval)
+      supabase.removeChannel(channel)
+    }
+  }, [selectedCall?.id])
+
+  // Smart auto-scroll: only scroll when NEW messages arrive (not on every poll)
+  useEffect(() => {
+    if (!selectedCall?.transcripts) return
+
+    const currentLength = selectedCall.transcripts.length
+    const previousLength = previousTranscriptLengthRef.current
+
+    // Only scroll if there are NEW messages (length increased)
+    // Skip on initial load (previousLength === 0) to prevent auto-scroll on page load
+    if (currentLength > previousLength && previousLength > 0) {
+      console.log('📜 New message detected, auto-scrolling to bottom')
+      setTimeout(() => {
+        transcriptEndRef.current?.scrollIntoView({ behavior: "smooth" })
+      }, 100)
+    }
+
+    // Update the reference
+    previousTranscriptLengthRef.current = currentLength
+  }, [selectedCall?.transcripts])
 
   const getTimeSince = (dateString: string) => {
     const date = new Date(dateString)
@@ -176,8 +296,8 @@ export default function TranscriptsPage() {
               {/* Transcript Messages */}
               <ScrollArea className="flex-1 p-6">
                 <div className="space-y-4 max-w-4xl mx-auto">
-                  {selectedCall.transcript ? (
-                    selectedCall.transcript.map((message: any, index: number) => (
+                  {selectedCall.transcripts && selectedCall.transcripts.length > 0 ? (
+                    formatTranscripts(selectedCall.transcripts).map((message: any, index: number) => (
                 <div key={index} className={`flex gap-3 ${message.speaker === "agent" ? "flex-row-reverse" : ""}`}>
                   <Avatar className="h-8 w-8 flex-shrink-0">
                     <AvatarFallback
@@ -207,6 +327,8 @@ export default function TranscriptsPage() {
                       <p className="text-sm text-muted-foreground mt-2">Messages will appear here as the conversation progresses</p>
                     </div>
                   )}
+                  {/* Auto-scroll anchor */}
+                  <div ref={transcriptEndRef} />
                 </div>
               </ScrollArea>
             </>
