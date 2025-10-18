@@ -67,6 +67,9 @@ export default function Navigation({ variant = "home" }: NavigationProps) {
               <Link href="#pricing" className="text-sm text-muted-foreground hover:text-foreground">
                 Pricing
               </Link>
+              <Link href="/reps" className="text-sm text-muted-foreground hover:text-foreground">
+                Reps
+              </Link>
               <Link href="#about" className="text-sm text-muted-foreground hover:text-foreground">
                 About
               </Link>
@@ -79,6 +82,9 @@ export default function Navigation({ variant = "home" }: NavigationProps) {
               </Link>
               <Link href="/transcripts" className="text-sm text-muted-foreground hover:text-foreground">
                 Transcripts
+              </Link>
+              <Link href="/settings" className="text-sm text-muted-foreground hover:text-foreground">
+                Settings
               </Link>
             </>
           )}
