@@ -16,6 +16,7 @@ import json
 import logging
 import io
 import numpy as np
+import time
 
 import uvicorn
 
@@ -743,8 +744,9 @@ async def websocket_endpoint(
     websocket: WebSocket,
     agent_id: str
 ):
-    """WebSocket endpoint for ElevenLabs agent conversations"""
+    """WebSocket endpoint for ElevenLabs agent conversations with robust persistence"""
     await websocket.accept()
+    connection_id = None
     
     try:
         # Get query parameters
@@ -771,17 +773,46 @@ async def websocket_endpoint(
             "connection_id": connection_id,
             "agent_id": agent_id,
             "session_id": session_id,
-            "user_id": user_id
+            "user_id": user_id,
+            "heartbeat_interval": 30,
+            "features": ["reconnection", "heartbeat", "persistence"]
         })
         
-        # Wait for the connection to be closed by the ElevenLabs service
-        # The message forwarding is handled by the service's background task
+        # Keep connection alive and handle client messages
         try:
             while True:
-                # Just keep the connection alive - message handling is done by the service
-                await asyncio.sleep(1)
-        except WebSocketDisconnect:
-            pass
+                try:
+                    # Wait for messages from client with timeout
+                    message = await asyncio.wait_for(
+                        websocket.receive_text(), 
+                        timeout=60.0  # 1 minute timeout
+                    )
+                    
+                    # Handle ping/pong for connection health
+                    try:
+                        data = json.loads(message)
+                        if data.get("type") == "pong":
+                            # Client responded to heartbeat
+                            continue
+                    except json.JSONDecodeError:
+                        pass
+                        
+                except asyncio.TimeoutError:
+                    # Send heartbeat to client
+                    try:
+                        await websocket.send_json({
+                            "type": "ping",
+                            "timestamp": time.time()
+                        })
+                    except Exception:
+                        break  # Connection lost
+                        
+                except WebSocketDisconnect:
+                    logger.info(f"Client disconnected for session: {session_id}")
+                    break
+                    
+        except Exception as e:
+            logger.error(f"WebSocket message handling error: {e}")
                 
     except Exception as e:
         logger.error(f"WebSocket connection error: {e}")
@@ -791,7 +822,7 @@ async def websocket_endpoint(
             pass
     finally:
         # Clean up connection
-        if 'connection_id' in locals():
+        if connection_id:
             await elevenlabs_ws_service.close_connection(connection_id)
 
 @app.post("/api/websocket/connect", response_model=WebSocketConnectionResponse)
@@ -896,13 +927,14 @@ class AudioBuffer:
 @app.websocket("/ws/audio/{session_id}")
 async def websocket_audio_endpoint(websocket: WebSocket, session_id: str):
     """
-    WebSocket endpoint for real-time audio streaming.
+    WebSocket endpoint for real-time audio streaming with ElevenLabs.
     
     Flow:
     1. Client connects and sends audio chunks
     2. Server buffers audio and detects silence
-    3. After 2 seconds of silence, processes the audio and responds
-    4. Continues until client disconnects
+    3. After 2 seconds of silence, sends audio to ElevenLabs
+    4. Streams ElevenLabs response back to client
+    5. Continues until client disconnects
     
     Message format:
     - Client sends: binary audio data (PCM 16-bit, 16kHz recommended)
@@ -924,13 +956,43 @@ async def websocket_audio_endpoint(websocket: WebSocket, session_id: str):
         await websocket.close()
         return
     
+    # Get agent_id from session metadata or use environment variable
+    agent_id = session.get("metadata", {}).get("agent_id", os.getenv("ELEVENLABS_AGENT_ID", "default_agent"))
+    
+    # Validate agent_id
+    if agent_id == "default_agent":
+        await websocket.send_json({
+            "error": "No valid ElevenLabs agent configured. Please set ELEVENLABS_AGENT_ID environment variable or create an agent.",
+            "instructions": "Run 'python create_elevenlabs_agent.py' to create an agent"
+        })
+        await websocket.close()
+        return
+    
     audio_buffer = AudioBuffer(
         silence_threshold=0.01,  # Adjust based on your needs
         silence_duration=2.0,     # 2 seconds of silence
         sample_rate=16000         # 16kHz sample rate
     )
     
+    elevenlabs_connection_id = None
+    
     try:
+        # Create ElevenLabs connection
+        elevenlabs_connection_id = await elevenlabs_ws_service.create_connection(
+            websocket=websocket,
+            agent_id=agent_id,
+            session_id=session_id,
+            user_id=session.get("customer_rep_id", "customer")
+        )
+        
+        print(f"Created ElevenLabs connection: {elevenlabs_connection_id}")
+        
+        await websocket.send_json({
+            "status": "connected",
+            "message": "Connected to ElevenLabs agent",
+            "connection_id": elevenlabs_connection_id
+        })
+        
         while True:
             # Receive audio data from client
             data = await websocket.receive()
@@ -942,7 +1004,7 @@ async def websocket_audio_endpoint(websocket: WebSocket, session_id: str):
                 silence_detected = audio_buffer.add_chunk(audio_chunk)
                 
                 if silence_detected:
-                    print(f"Silence detected for session {session_id}, processing audio...")
+                    print(f"Silence detected for session {session_id}, sending to ElevenLabs...")
                     
                     # Get all buffered audio
                     complete_audio = audio_buffer.get_audio()
@@ -950,45 +1012,29 @@ async def websocket_audio_endpoint(websocket: WebSocket, session_id: str):
                     # Send acknowledgment
                     await websocket.send_json({
                         "status": "processing",
-                        "message": "Audio received, processing..."
+                        "message": "Audio received, sending to ElevenLabs..."
                     })
                     
                     try:
-                        # ECHO MODE: Just send back the same audio for testing
-                        # Save audio to temp file for echo
-                        temp_audio_path = f"/tmp/audio_{session_id}_{uuid.uuid4()}.wav"
+                        # Convert audio to base64 and send to ElevenLabs
+                        import base64
+                        audio_base64 = base64.b64encode(complete_audio).decode('ascii')
                         
-                        # Write raw PCM data to WAV file
-                        import wave
-                        with wave.open(temp_audio_path, 'wb') as wav_file:
-                            wav_file.setnchannels(1)  # Mono
-                            wav_file.setsampwidth(2)  # 16-bit
-                            wav_file.setframerate(16000)  # 16kHz
-                            wav_file.writeframes(complete_audio)
+                        print(f"Sending {len(complete_audio)} bytes to ElevenLabs via connection {elevenlabs_connection_id}")
                         
-                        print(f"Echo mode: Sending back audio - {len(complete_audio)} bytes")
+                        # Send audio chunk to ElevenLabs
+                        await elevenlabs_ws_service.send_audio_chunk(
+                            connection_id=elevenlabs_connection_id,
+                            audio_data=complete_audio
+                        )
                         
-                        # Read the audio file and send as bytes (ECHO)
-                        with open(temp_audio_path, 'rb') as audio_file:
-                            response_audio_bytes = audio_file.read()
+                        print(f"✅ Successfully sent audio to ElevenLabs")
                         
-                        # Send response status
-                        await websocket.send_json({
-                            "status": "complete",
-                            "transcript": "[Echo mode - audio will be played back]",
-                            "response_text": "This is your audio played back to you"
-                        })
-                        
-                        # Send the same audio back (echo)
-                        await websocket.send_bytes(response_audio_bytes)
-                        
-                        print(f"Echo sent: {len(response_audio_bytes)} bytes")
-                        
-                        # Cleanup temp file
-                        os.remove(temp_audio_path)
+                        # The response will be handled by the ElevenLabs service
+                        # and forwarded back to the client automatically
                         
                     except Exception as e:
-                        print(f"Error processing audio: {e}")
+                        print(f"❌ Error sending to ElevenLabs: {e}")
                         import traceback
                         traceback.print_exc()
                         await websocket.send_json({
@@ -1016,6 +1062,9 @@ async def websocket_audio_endpoint(websocket: WebSocket, session_id: str):
         except:
             pass
     finally:
+        # Clean up ElevenLabs connection
+        if elevenlabs_connection_id:
+            await elevenlabs_ws_service.close_connection(elevenlabs_connection_id)
         print(f"Closing WebSocket for session: {session_id}")
 
 
