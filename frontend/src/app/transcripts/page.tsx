@@ -8,6 +8,7 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
 import { Phone, Clock, ArrowLeft } from "lucide-react"
 import Link from "next/link"
+import Navigation from "@/components/Navigation"
 
 // Mock data for ongoing calls
 const ongoingCalls = [
@@ -159,8 +160,10 @@ export default function TranscriptsPage() {
 
   return (
     <div className="min-h-screen bg-background">
-      {/* Header */}
-      <header className="border-b border-border bg-card/50 backdrop-blur-sm sticky top-0 z-10">
+      <Navigation variant="dashboard" />
+      
+      {/* Page Header */}
+      <div className="border-b border-border bg-card/50 backdrop-blur-sm">
         <div className="flex items-center justify-between px-6 py-4">
           <div className="flex items-center gap-4">
             <Link href="/dashboard">
@@ -178,7 +181,7 @@ export default function TranscriptsPage() {
             {ongoingCalls.length} Active Calls
           </Badge>
         </div>
-      </header>
+      </div>
 
       <div className="flex h-[calc(100vh-73px)]">
         {/* Left Sidebar - Call List */}

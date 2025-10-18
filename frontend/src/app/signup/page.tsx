@@ -36,6 +36,7 @@ export default function SignUpPage() {
     }
   }, [user, router])
 
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     setIsLoading(true)
@@ -76,7 +77,7 @@ export default function SignUpPage() {
         setSuccess(true)
         // Redirect to dashboard after successful signup
         setTimeout(() => {
-          router.push('/dashboard')
+          router.push('/home')
         }, 2000)
       }
     } catch (err) {
