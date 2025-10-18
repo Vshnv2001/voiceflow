@@ -3,7 +3,7 @@ VoiceFlow AI - Voice-based Customer Service Backend
 FastAPI application for handling voice messages, AI responses, and agent approvals
 """
 
-from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, BackgroundTasks, Form, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, BackgroundTasks, Form, WebSocket, WebSocketDisconnect, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
@@ -14,6 +14,8 @@ from datetime import datetime
 import uuid
 import json
 import logging
+import io
+import numpy as np
 
 import uvicorn
 
@@ -84,13 +86,17 @@ async def initiate_customer_service_call(
 ):
     """Initiate a customer service call"""
     try:
+        print(f"📞 Initiating call - rep_id: {call_data.rep_id}, customer_name: {call_data.customer_name}")
         session = await db_service.create_session(
             customer_rep_id=call_data.rep_id,
             customer_name=call_data.customer_name,
             metadata=call_data.metadata
         )
+        print(f"✅ Session created successfully! ID: {session.get('id')}")
+        print(f"Session data being returned: {session}")
         return session
     except Exception as e:
+        print(f"❌ Error creating session: {e}")
         raise HTTPException(status_code=500, detail=str(e))
     
 @app.post("/api/customer-service/call/accept", response_model=SessionResponse)
@@ -834,6 +840,184 @@ async def close_websocket_connection(
         return {"message": "Connection closed successfully"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# ==================== WEBSOCKET AUDIO STREAMING ====================
+
+class AudioBuffer:
+    """Buffer to accumulate audio chunks and detect silence"""
+    def __init__(self, silence_threshold: float = 0.01, silence_duration: float = 2.0, sample_rate: int = 16000):
+        self.buffer = []
+        self.silence_threshold = silence_threshold
+        self.silence_duration = silence_duration
+        self.sample_rate = sample_rate
+        self.silence_samples = int(silence_duration * sample_rate)
+        self.current_silence_count = 0
+        
+    def add_chunk(self, audio_data: bytes) -> bool:
+        """
+        Add audio chunk to buffer and check for silence.
+        Returns True if silence detected for specified duration.
+        """
+        self.buffer.append(audio_data)
+        
+        # Convert bytes to numpy array for amplitude analysis
+        try:
+            audio_array = np.frombuffer(audio_data, dtype=np.int16)
+            # Normalize to -1.0 to 1.0
+            audio_normalized = audio_array.astype(np.float32) / 32768.0
+            
+            # Calculate RMS (Root Mean Square) for volume level
+            rms = np.sqrt(np.mean(audio_normalized ** 2))
+            
+            # Check if this chunk is silent
+            if rms < self.silence_threshold:
+                self.current_silence_count += len(audio_array)
+            else:
+                # Reset silence counter if sound detected
+                self.current_silence_count = 0
+            
+            # Return True if we've had enough silence
+            return self.current_silence_count >= self.silence_samples
+            
+        except Exception as e:
+            print(f"Error processing audio chunk: {e}")
+            return False
+    
+    def get_audio(self) -> bytes:
+        """Get all buffered audio as bytes"""
+        return b''.join(self.buffer)
+    
+    def clear(self):
+        """Clear the buffer"""
+        self.buffer = []
+        self.current_silence_count = 0
+
+
+@app.websocket("/ws/audio/{session_id}")
+async def websocket_audio_endpoint(websocket: WebSocket, session_id: str):
+    """
+    WebSocket endpoint for real-time audio streaming.
+    
+    Flow:
+    1. Client connects and sends audio chunks
+    2. Server buffers audio and detects silence
+    3. After 2 seconds of silence, processes the audio and responds
+    4. Continues until client disconnects
+    
+    Message format:
+    - Client sends: binary audio data (PCM 16-bit, 16kHz recommended)
+    - Server sends: JSON with response audio URL or direct audio bytes
+    """
+    await websocket.accept()
+    print(f"WebSocket connection established for session: {session_id}")
+    
+    # Verify session exists (query directly without customer_rep_id check for customer access)
+    try:
+        result = db_service.supabase.table("sessions").select("*").eq("id", session_id).single().execute()
+        if not result.data:
+            await websocket.send_json({"error": "Session not found"})
+            await websocket.close()
+            return
+        session = result.data
+    except Exception as e:
+        await websocket.send_json({"error": f"Failed to verify session: {str(e)}"})
+        await websocket.close()
+        return
+    
+    audio_buffer = AudioBuffer(
+        silence_threshold=0.01,  # Adjust based on your needs
+        silence_duration=2.0,     # 2 seconds of silence
+        sample_rate=16000         # 16kHz sample rate
+    )
+    
+    try:
+        while True:
+            # Receive audio data from client
+            data = await websocket.receive()
+            
+            if "bytes" in data:
+                audio_chunk = data["bytes"]
+                
+                # Add chunk to buffer and check for silence
+                silence_detected = audio_buffer.add_chunk(audio_chunk)
+                
+                if silence_detected:
+                    print(f"Silence detected for session {session_id}, processing audio...")
+                    
+                    # Get all buffered audio
+                    complete_audio = audio_buffer.get_audio()
+                    
+                    # Send acknowledgment
+                    await websocket.send_json({
+                        "status": "processing",
+                        "message": "Audio received, processing..."
+                    })
+                    
+                    try:
+                        # ECHO MODE: Just send back the same audio for testing
+                        # Save audio to temp file for echo
+                        temp_audio_path = f"/tmp/audio_{session_id}_{uuid.uuid4()}.wav"
+                        
+                        # Write raw PCM data to WAV file
+                        import wave
+                        with wave.open(temp_audio_path, 'wb') as wav_file:
+                            wav_file.setnchannels(1)  # Mono
+                            wav_file.setsampwidth(2)  # 16-bit
+                            wav_file.setframerate(16000)  # 16kHz
+                            wav_file.writeframes(complete_audio)
+                        
+                        print(f"Echo mode: Sending back audio - {len(complete_audio)} bytes")
+                        
+                        # Read the audio file and send as bytes (ECHO)
+                        with open(temp_audio_path, 'rb') as audio_file:
+                            response_audio_bytes = audio_file.read()
+                        
+                        # Send response status
+                        await websocket.send_json({
+                            "status": "complete",
+                            "transcript": "[Echo mode - audio will be played back]",
+                            "response_text": "This is your audio played back to you"
+                        })
+                        
+                        # Send the same audio back (echo)
+                        await websocket.send_bytes(response_audio_bytes)
+                        
+                        print(f"Echo sent: {len(response_audio_bytes)} bytes")
+                        
+                        # Cleanup temp file
+                        os.remove(temp_audio_path)
+                        
+                    except Exception as e:
+                        print(f"Error processing audio: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        await websocket.send_json({
+                            "status": "error",
+                            "error": str(e)
+                        })
+                    
+                    # Clear buffer for next utterance
+                    audio_buffer.clear()
+            
+            elif "text" in data:
+                # Handle text messages (e.g., control messages)
+                message = data["text"]
+                print(f"Received text message: {message}")
+                
+                if message == "ping":
+                    await websocket.send_json({"status": "pong"})
+                    
+    except WebSocketDisconnect:
+        print(f"WebSocket disconnected for session: {session_id}")
+    except Exception as e:
+        print(f"WebSocket error for session {session_id}: {e}")
+        try:
+            await websocket.send_json({"error": str(e)})
+        except:
+            pass
+    finally:
+        print(f"Closing WebSocket for session: {session_id}")
+
 
 # ==================== HEALTH CHECK ====================
 

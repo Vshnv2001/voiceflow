@@ -16,6 +16,7 @@ import {
 } from "lucide-react"
 import Navigation from "@/components/Navigation"
 import { initiateCustomerServiceCall } from "@/lib/api"
+import { useSessionStatus } from "@/hooks/useSessionStatus"
 
 interface Rep {
   id: string
@@ -47,12 +48,23 @@ export default function RepDetailPage() {
   const [callStatus, setCallStatus] = useState<'idle' | 'initiating' | 'pending' | 'active' | 'error'>('idle')
   const [callStatusMessage, setCallStatusMessage] = useState<string>("")
   const [sessionId, setSessionId] = useState<string | null>(null)
+  
+  // Poll for session status changes
+  const { session: polledSession } = useSessionStatus(sessionId)
 
   useEffect(() => {
     if (params.id) {
       loadRep(params.id as string)
     }
   }, [params.id])
+
+  // Redirect to conversation page when session becomes active
+  useEffect(() => {
+    if (polledSession && polledSession.status === 'active' && sessionId) {
+      console.log('Session is now active! Redirecting to conversation page...')
+      router.push(`/conversation/${sessionId}`)
+    }
+  }, [polledSession, sessionId, router])
 
   const loadRep = async (repId: string) => {
     try {
@@ -140,6 +152,8 @@ export default function RepDetailPage() {
       })
       
       if (response.data) {
+        console.log('API Response:', response.data)
+        console.log('Session ID from response:', (response.data as any).id)
         setSessionId((response.data as any).id)
         setCallStatus('pending')
         setCallStatusMessage(`Call request sent! Waiting for ${rep?.display_name} to accept...`)

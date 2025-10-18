@@ -156,7 +156,7 @@ export function usePendingSessions() {
       // Remove from pending list (realtime will handle this too, but this is immediate)
       setPendingSessions((prev) => prev.filter((s) => s.id !== sessionId))
       
-      return { success: true }
+      return { success: true, sessionId }
     } catch (err) {
       console.error('Error accepting session:', err)
       return { 
