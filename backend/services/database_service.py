@@ -52,7 +52,7 @@ class DatabaseService:
             print(f"Error accepting session: {e}")
             return False
     
-    async def get_session(self, session_id: str, user_id: str) -> Optional[Dict[str, Any]]:
+    async def get_session(self, session_id: str, customer_rep_id: str) -> Optional[Dict[str, Any]]:
         """Get a session by ID"""
         try:
             result = self.supabase.table("sessions").select("*").eq("id", session_id).eq("customer_rep_id", customer_rep_id).execute()

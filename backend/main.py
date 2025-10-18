@@ -72,13 +72,17 @@ async def initiate_customer_service_call(
 ):
     """Initiate a customer service call"""
     try:
+        print(f"📞 Initiating call - rep_id: {call_data.rep_id}, customer_name: {call_data.customer_name}")
         session = await db_service.create_session(
             customer_rep_id=call_data.rep_id,
             customer_name=call_data.customer_name,
             metadata=call_data.metadata
         )
+        print(f"✅ Session created successfully! ID: {session.get('id')}")
+        print(f"Session data being returned: {session}")
         return session
     except Exception as e:
+        print(f"❌ Error creating session: {e}")
         raise HTTPException(status_code=500, detail=str(e))
     
 @app.post("/api/customer-service/call/accept", response_model=SessionResponse)
