@@ -245,6 +245,7 @@ CREATE TABLE IF NOT EXISTS knowledge_documents (
     content_text TEXT, -- Extracted text content
     status TEXT NOT NULL DEFAULT 'processing' CHECK (status IN ('processing', 'processed', 'failed')),
     processing_error TEXT,
+    elevenlabs_file_id TEXT, -- ElevenLabs knowledge base file ID
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );

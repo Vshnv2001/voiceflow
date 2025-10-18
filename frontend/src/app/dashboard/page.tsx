@@ -299,10 +299,25 @@ export default function DashboardPage() {
     setFiles((prev) => prev.filter((_, i) => i !== idx))
   }
 
+  function resetUploadState() {
+    setFiles([])
+    setSelectedCollectionIds([])
+    setNewColOpen(false)
+    setNewColName("")
+    setNewColDesc("")
+    setNewColPublic(true)
+    // Clear the file input
+    if (fileInputRef.current) {
+      fileInputRef.current.value = ""
+    }
+  }
+
   // ===== Upload =====
   async function uploadAll() {
     if (!files.length) return
     setUploading(true)
+
+    let hasErrors = false
 
     for (let i = 0; i < files.length; i++) {
       // skip already finished
@@ -343,6 +358,7 @@ export default function DashboardPage() {
           return copy
         })
       } catch (e: any) {
+        hasErrors = true
         setFiles((prev) => {
           const copy = [...prev]
           copy[i] = { ...copy[i], status: "error", error: e?.message || "Upload failed" }
@@ -353,6 +369,14 @@ export default function DashboardPage() {
 
     await refreshDocuments()
     setUploading(false)
+
+    // Reset the upload state after a short delay to show completion status
+    // Only reset if there were no errors, so users can see what failed
+    if (!hasErrors) {
+      setTimeout(() => {
+        resetUploadState()
+      }, 2000) // 2 second delay to show success state
+    }
   }
 
   async function deleteDocument(id: string) {
@@ -671,15 +695,25 @@ export default function DashboardPage() {
                     ))}
                   </div>
 
-                  <Button className="w-full" onClick={uploadAll} disabled={uploading}>
-                    {uploading ? (
-                      <span className="inline-flex items-center gap-2">
-                        <Loader2 className="h-4 w-4 animate-spin" /> Uploading…
-                      </span>
-                    ) : (
-                      "Upload & Process"
-                    )}
-                  </Button>
+                  <div className="flex gap-2">
+                    <Button className="flex-1" onClick={uploadAll} disabled={uploading}>
+                      {uploading ? (
+                        <span className="inline-flex items-center gap-2">
+                          <Loader2 className="h-4 w-4 animate-spin" /> Uploading…
+                        </span>
+                      ) : (
+                        "Upload & Process"
+                      )}
+                    </Button>
+                    <Button 
+                      variant="outline" 
+                      onClick={resetUploadState} 
+                      disabled={uploading}
+                      title="Clear all files"
+                    >
+                      <X className="h-4 w-4" />
+                    </Button>
+                  </div>
                 </div>
               )}
             </CardContent>
