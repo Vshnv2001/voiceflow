@@ -4,7 +4,7 @@ Cursor for Customer Service Reps
 
 ## Set up Instructions
 
-` git clone <repo_url>`
+` git clone https://github.com/Vshnv2001/voiceflow.git`
 
 ### Frontend
 
