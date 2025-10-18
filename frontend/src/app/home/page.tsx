@@ -5,40 +5,12 @@ import { Card } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import Link from "next/link"
 import { Mic, Zap, Shield, TrendingUp, Users, Clock } from "lucide-react"
+import Navigation from "@/components/Navigation"
 
 export default function HomePage() {
   return (
     <div className="min-h-screen bg-background">
-      {/* Navigation */}
-      <nav className="border-b border-border bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-        <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-4">
-          <div className="flex items-center gap-2">
-            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary">
-              <Mic className="h-5 w-5 text-primary-foreground" />
-            </div>
-            <span className="text-xl font-bold">VoiceFlow AI</span>
-          </div>
-          <div className="hidden items-center gap-8 md:flex">
-            <Link href="#features" className="text-sm text-muted-foreground hover:text-foreground">
-              Features
-            </Link>
-            <Link href="#pricing" className="text-sm text-muted-foreground hover:text-foreground">
-              Pricing
-            </Link>
-            <Link href="#about" className="text-sm text-muted-foreground hover:text-foreground">
-              About
-            </Link>
-          </div>
-          <div className="flex items-center gap-3">
-            <Button variant="ghost" asChild>
-              <Link href="/login">Log in</Link>
-            </Button>
-            <Button asChild>
-              <Link href="/signup">Get Started</Link>
-            </Button>
-          </div>
-        </div>
-      </nav>
+      <Navigation variant="home" />
 
       {/* Hero Section */}
       <section className="mx-auto max-w-7xl px-6 py-24 text-center">
