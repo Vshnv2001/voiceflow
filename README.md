@@ -13,3 +13,10 @@ cd frontend
 npm install
 npm run dev
 ```
+
+### Backend
+
+```
+cd backend
+docker-compose up --build -d
+```
