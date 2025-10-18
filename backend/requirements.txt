@@ -16,6 +16,8 @@ supabase_functions
 aiohttp
 httpx
 certifi
+websockets
+requests
 
 # Authentication and security
 python-jose[cryptography]
